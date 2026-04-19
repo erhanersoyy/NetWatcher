@@ -21,9 +21,34 @@ function isBlockableIP(ip: string): boolean {
   return true;
 }
 
+// Validate sudo credentials by running `sudo -v` (refresh timestamp, no command).
+// Password is piped via stdin and never retained. `-p ''` suppresses the prompt
+// so stderr stays clean. On success the sudo timestamp cache is primed so that
+// subsequent `sudo -n pfctl` calls within this request don't need the password
+// again. We never cache the password ourselves.
+function validateSudo(password: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn('sudo', ['-S', '-p', '', '-v'], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stderr = '';
+    child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
+    child.on('error', reject);
+    const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('sudo timeout')); }, 5000);
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve();
+      else reject(new Error('sudo authentication failed (wrong password or sudo not permitted)'));
+    });
+    child.stdin.end(password + '\n');
+  });
+}
+
+// Load anchor rules via `sudo -n pfctl -a <anchor> -f -`. Relies on a valid
+// sudo timestamp (primed by validateSudo) — never receives the password itself.
 function loadAnchorRules(rules: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn('sudo', ['/sbin/pfctl', '-a', ANCHOR, '-f', '-'], {
+    const child = spawn('sudo', ['-n', '/sbin/pfctl', '-a', ANCHOR, '-f', '-'], {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     let stderr = '';
@@ -42,36 +67,49 @@ function loadAnchorRules(rules: string): Promise<void> {
 async function ensureAnchor(): Promise<void> {
   if (anchorInitialized) return;
 
-  // Enable pf if not already
+  // Enable pf if not already. `-n` avoids a fresh password prompt; sudo timestamp
+  // primed by validateSudo covers this call.
   try {
-    await execFileAsync('sudo', ['/sbin/pfctl', '-e']);
+    await execFileAsync('sudo', ['-n', '/sbin/pfctl', '-e']);
   } catch {
-    // Already enabled — pfctl -e returns exit 1 if already active
+    // Already enabled — pfctl -e returns exit 1 if active; ignore.
   }
 
-  const rules = [
-    `table <${TABLE}> persist`,
-    `block drop quick from any to <${TABLE}>`,
-    `block drop quick from <${TABLE}> to any`,
-  ].join('\n');
+  // macOS pf (FreeBSD 4.x-era) is strict about table references in the
+  // `from` position — rules without explicit direction can fail to parse.
+  // Always specify `in`/`out` and end with `\n` (pfctl expects a trailing newline).
+  const rules =
+    `table <${TABLE}> persist\n` +
+    `block drop out quick from any to <${TABLE}>\n` +
+    `block drop in  quick from <${TABLE}> to any\n`;
 
   try {
     await loadAnchorRules(rules);
     anchorInitialized = true;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    throw new Error(`Failed to initialize firewall anchor: ${msg}. Run server with sudo or configure passwordless sudo for pfctl.`);
+    throw new Error(`Failed to initialize firewall anchor: ${msg}`);
   }
 }
 
-export async function blockIP(ip: string): Promise<{ success: boolean; message: string }> {
+export async function blockIP(ip: string, password: string): Promise<{ success: boolean; message: string }> {
   if (!isBlockableIP(ip)) {
     return { success: false, message: 'Invalid or non-blockable IP address' };
+  }
+  if (typeof password !== 'string' || password.length === 0) {
+    return { success: false, message: 'sudo password required' };
+  }
+
+  try {
+    await validateSudo(password);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { success: false, message: msg };
   }
 
   try {
     await ensureAnchor();
-    await execFileAsync('sudo', ['/sbin/pfctl', '-a', ANCHOR, '-t', TABLE, '-T', 'add', ip], { timeout: 5000 });
+    await execFileAsync('sudo', ['-n', '/sbin/pfctl', '-a', ANCHOR, '-t', TABLE, '-T', 'add', ip], { timeout: 5000 });
     return { success: true, message: `Blocked ${ip}` };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -79,14 +117,24 @@ export async function blockIP(ip: string): Promise<{ success: boolean; message: 
   }
 }
 
-export async function unblockIP(ip: string): Promise<{ success: boolean; message: string }> {
+export async function unblockIP(ip: string, password: string): Promise<{ success: boolean; message: string }> {
   if (!isBlockableIP(ip)) {
     return { success: false, message: 'Invalid or non-blockable IP address' };
+  }
+  if (typeof password !== 'string' || password.length === 0) {
+    return { success: false, message: 'sudo password required' };
+  }
+
+  try {
+    await validateSudo(password);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { success: false, message: msg };
   }
 
   try {
     await ensureAnchor();
-    await execFileAsync('sudo', ['/sbin/pfctl', '-a', ANCHOR, '-t', TABLE, '-T', 'delete', ip], { timeout: 5000 });
+    await execFileAsync('sudo', ['-n', '/sbin/pfctl', '-a', ANCHOR, '-t', TABLE, '-T', 'delete', ip], { timeout: 5000 });
     return { success: true, message: `Unblocked ${ip}` };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -95,9 +143,9 @@ export async function unblockIP(ip: string): Promise<{ success: boolean; message
 }
 
 export async function getBlockedIPs(): Promise<string[]> {
+  // Read-only; try non-interactively. If sudo timestamp isn't primed, return [].
   try {
-    await ensureAnchor();
-    const { stdout } = await execFileAsync('sudo', ['/sbin/pfctl', '-a', ANCHOR, '-t', TABLE, '-T', 'show'], { timeout: 5000 });
+    const { stdout } = await execFileAsync('sudo', ['-n', '/sbin/pfctl', '-a', ANCHOR, '-t', TABLE, '-T', 'show'], { timeout: 5000 });
     return stdout.split('\n').map(l => l.trim()).filter(Boolean);
   } catch {
     return [];

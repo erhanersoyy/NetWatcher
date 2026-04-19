@@ -312,32 +312,56 @@ async function fetchBlockedIPs() {
   } catch { /* ignore */ }
 }
 
-async function blockIPAction(ip) {
+async function sendFirewallRequest(path, ip, password) {
+  // Send password to local backend (127.0.0.1 only). The value lives in this
+  // function scope; after the body is serialized we overwrite the local ref.
+  let body = JSON.stringify({ password });
+  password = '';
   try {
-    const res = await fetch(`/api/block/${encodeURIComponent(ip)}`, { method: 'POST', headers: CSRF_HEADER });
-    const result = await res.json();
-    showToast(result.message, result.success ? 'success' : 'error');
-    if (result.success) {
-      blockedIPs.add(ip);
-      if (lastData) render(lastData);
-    }
-  } catch (err) {
-    showToast('Failed to block IP: ' + err.message, 'error');
+    const res = await fetch(path, {
+      method: 'POST',
+      headers: { ...CSRF_HEADER, 'Content-Type': 'application/json' },
+      body,
+    });
+    body = '';
+    return await res.json();
+  } finally {
+    body = '';
   }
 }
 
-async function unblockIPAction(ip) {
-  try {
-    const res = await fetch(`/api/unblock/${encodeURIComponent(ip)}`, { method: 'POST', headers: CSRF_HEADER });
-    const result = await res.json();
-    showToast(result.message, result.success ? 'success' : 'error');
-    if (result.success) {
-      blockedIPs.delete(ip);
-      if (lastData) render(lastData);
+function blockIPAction(ip) {
+  askSudoPassword('Block', ip, async (password) => {
+    if (!password) return;
+    try {
+      const result = await sendFirewallRequest(`/api/block/${encodeURIComponent(ip)}`, ip, password);
+      password = '';
+      showToast(result.message, result.success ? 'success' : 'error');
+      if (result.success) {
+        blockedIPs.add(ip);
+        if (lastData) render(lastData);
+      }
+    } catch (err) {
+      showToast('Failed to block IP: ' + err.message, 'error');
     }
-  } catch (err) {
-    showToast('Failed to unblock IP: ' + err.message, 'error');
-  }
+  });
+}
+
+function unblockIPAction(ip) {
+  askSudoPassword('Unblock', ip, async (password) => {
+    if (!password) return;
+    try {
+      const result = await sendFirewallRequest(`/api/unblock/${encodeURIComponent(ip)}`, ip, password);
+      password = '';
+      showToast(result.message, result.success ? 'success' : 'error');
+      if (result.success) {
+        blockedIPs.delete(ip);
+        if (lastData) render(lastData);
+      }
+    } catch (err) {
+      showToast('Failed to unblock IP: ' + err.message, 'error');
+    }
+  });
 }
 
 // --- VirusTotal ---
@@ -531,6 +555,57 @@ function showConfirmDialog(message, onConfirm) {
   overlay.querySelector('.confirm-cancel').addEventListener('click', () => overlay.remove());
   overlay.querySelector('.confirm-kill').addEventListener('click', () => { overlay.remove(); onConfirm(); });
   overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+}
+
+function askSudoPassword(action, ip, onSubmit) {
+  const existing = document.getElementById('sudoOverlay');
+  if (existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'sudoOverlay';
+  overlay.className = 'confirm-overlay';
+  overlay.innerHTML = `
+    <div class="confirm-dialog sudo-dialog">
+      <div class="confirm-icon">&#9888;</div>
+      <div class="confirm-message">
+        <div class="sudo-title">sudo operation</div>
+        <div class="sudo-body">
+          <strong>${escapeHtml(action)}</strong> runs <code>pfctl</code> as root to modify the firewall.<br>
+          Target IP: <code>${escapeHtml(ip)}</code>
+        </div>
+        <div class="sudo-note">Your password is sent once to the local server and <strong>never stored</strong>.</div>
+      </div>
+      <input type="password" class="sudo-input" placeholder="System password" autocomplete="off" autocapitalize="off" spellcheck="false" />
+      <div class="confirm-actions">
+        <button class="confirm-btn confirm-cancel">Cancel</button>
+        <button class="confirm-btn confirm-kill sudo-submit">Proceed</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  const input = overlay.querySelector('.sudo-input');
+  input.focus();
+
+  const cleanup = (submitted) => {
+    let pwd = submitted ? input.value : '';
+    // Overwrite then clear the input value before removing it from the DOM.
+    input.value = '';
+    overlay.remove();
+    return pwd;
+  };
+  const cancel = () => { cleanup(false); };
+  const submit = () => {
+    const pwd = cleanup(true);
+    onSubmit(pwd);
+  };
+
+  overlay.querySelector('.confirm-cancel').addEventListener('click', cancel);
+  overlay.querySelector('.sudo-submit').addEventListener('click', submit);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); submit(); }
+    else if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+  });
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) cancel(); });
 }
 
 function showToast(message, type) {
