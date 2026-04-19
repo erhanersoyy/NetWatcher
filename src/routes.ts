@@ -70,13 +70,15 @@ router.get('/api/vt/:ip', async (req, res) => {
 
 router.post('/api/block/:ip', async (req, res) => {
   const ip = req.params.ip;
-  const result = await blockIP(ip);
+  const password = typeof req.body?.password === 'string' ? req.body.password : '';
+  const result = await blockIP(ip, password);
   res.status(result.success ? 200 : 400).json(result);
 });
 
 router.post('/api/unblock/:ip', async (req, res) => {
   const ip = req.params.ip;
-  const result = await unblockIP(ip);
+  const password = typeof req.body?.password === 'string' ? req.body.password : '';
+  const result = await unblockIP(ip, password);
   res.status(result.success ? 200 : 400).json(result);
 });
 

@@ -705,6 +705,50 @@ h1 {
   background: #f8514944;
 }
 
+/* --- sudo password dialog --- */
+.sudo-dialog .sudo-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: #d29922;
+  margin-bottom: 10px;
+  letter-spacing: 0.3px;
+}
+.sudo-dialog .sudo-body {
+  font-size: 13px;
+  color: #c9d1d9;
+  margin-bottom: 10px;
+}
+.sudo-dialog .sudo-body code {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: #e6edf3;
+}
+.sudo-dialog .sudo-note {
+  font-size: 12px;
+  color: #8b949e;
+  margin-bottom: 4px;
+}
+.sudo-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 12px;
+  border-radius: 6px;
+  border: 1px solid #30363d;
+  background: #0d1117;
+  color: #e6edf3;
+  font-family: inherit;
+  font-size: 13px;
+  margin-bottom: 16px;
+  outline: none;
+}
+.sudo-input:focus {
+  border-color: #58a6ff;
+  box-shadow: 0 0 0 2px #58a6ff33;
+}
+
 /* Toast */
 .toast {
   position: fixed;
