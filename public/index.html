@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NetWatcher</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://unpkg.com/globe.gl@2.35.1/dist/globe.gl.min.js"></script>
+</head>
+<body>
+  <header>
+    <div class="header-left">
+      <h1>NetWatcher</h1>
+      <span class="status-dot" id="statusDot"></span>
+      <span class="status-text" id="statusText">Connecting...</span>
+    </div>
+    <div class="header-right">
+      <span id="processCount">0 processes</span>
+      <span class="separator">|</span>
+      <span id="connectionCount">0 connections</span>
+    </div>
+  </header>
+
+  <div class="host-info-bar" id="hostInfoBar">
+    <div class="host-info-item">
+      <span class="host-label">Hostname</span>
+      <span class="host-value" id="hostHostname">--</span>
+    </div>
+    <div class="host-info-item">
+      <span class="host-label">Local IP</span>
+      <span class="host-value" id="hostLocalIP">--</span>
+    </div>
+    <div class="host-info-item">
+      <span class="host-label">Public IP</span>
+      <span class="host-value" id="hostPublicIP">--</span>
+    </div>
+    <div class="host-info-item">
+      <span class="host-label">Location</span>
+      <span class="host-value" id="hostLocation">--</span>
+    </div>
+    <div class="host-info-item">
+      <span class="host-label">ISP</span>
+      <span class="host-value" id="hostISP">--</span>
+    </div>
+  </div>
+
+  <div class="content-layout">
+    <div class="left-panel">
+      <div class="filters-bar">
+        <div class="filter-group">
+          <label class="filter-toggle">
+            <input type="checkbox" id="filterIPv6"> Exclude IPv6
+          </label>
+          <label class="filter-toggle">
+            <input type="checkbox" id="filterPrivate"> Exclude Private IPs
+          </label>
+          <label class="filter-toggle">
+            <input type="checkbox" id="filterLocalhost"> Exclude Localhost
+          </label>
+          <label class="filter-toggle">
+            <input type="checkbox" id="filterSystem"> Hide System Processes
+          </label>
+        </div>
+        <div class="filter-group">
+          <button class="toolbar-btn" id="expandAllBtn" title="Expand All">Expand All</button>
+          <button class="toolbar-btn" id="collapseAllBtn" title="Collapse All">Collapse All</button>
+          <label class="sort-label">Sort:
+            <select class="sort-select" id="sortSelect">
+              <option value="connections">Connections</option>
+              <option value="pid">PID</option>
+              <option value="name">Name</option>
+            </select>
+          </label>
+          <input type="text" class="search-input" id="searchInput" placeholder="Search process name or IP...">
+        </div>
+      </div>
+      <div id="app">
+        <div class="loading">Loading connections...</div>
+      </div>
+    </div>
+    <div class="right-panel">
+      <div class="globe-container" id="globeContainer"></div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

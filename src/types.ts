@@ -1,0 +1,45 @@
+export interface Connection {
+  pid: number;
+  processName: string;
+  protocol: string;
+  localAddress: string;
+  localPort: number;
+  remoteAddress: string;
+  remotePort: number;
+  state: string;
+}
+
+export interface GeoInfo {
+  country: string;
+  countryCode: string;
+  city: string;
+  isp: string;
+  lat: number;
+  lon: number;
+}
+
+export interface HostInfo {
+  localIP: string;
+  publicIP: string;
+  hostname: string;
+  geo: GeoInfo | null;
+}
+
+export interface EnrichedConnection {
+  protocol: string;
+  remoteAddress: string;
+  remotePort: number;
+  localAddress: string;
+  localPort: number;
+  state: string;
+  geo: GeoInfo | null;
+  domain: string;
+}
+
+export interface ProcessInfo {
+  pid: number;
+  processName: string;
+  description: string;
+  isSystemProcess: boolean;
+  connections: EnrichedConnection[];
+}
