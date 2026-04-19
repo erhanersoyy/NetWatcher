@@ -23,7 +23,6 @@ pnpm-debug.log*
 .env.local
 .env.*.local
 
-# Claude Code local state (per-user, not for sharing)
-.claude/settings.local.json
-.claude/agent-memory/
+# Claude Code — entire config directory is per-user, not for sharing
+.claude/
 CLAUDE.local.md
