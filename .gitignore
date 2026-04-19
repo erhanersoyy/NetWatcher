@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# macOS
+.DS_Store
+
+# Editors / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Env / local overrides
+.env
+.env.local
+.env.*.local
+
+# Claude Code local state (per-user, not for sharing)
+.claude/settings.local.json
+.claude/agent-memory/
+CLAUDE.local.md

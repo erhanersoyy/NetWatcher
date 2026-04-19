@@ -1,0 +1,40 @@
+# NetWatcher — system requirements
+# (This is a Node.js project, not Python — this file is a human-readable
+# checklist of what must exist on the host before `./setup.sh`.)
+
+# ─── Platform ────────────────────────────────────────────────────────────
+macOS                  >= 12 (Monterey)    # lsof + pfctl behaviour assumed
+
+# ─── Runtime ─────────────────────────────────────────────────────────────
+node                   >= 20.0.0
+pnpm                   == 9.15.4           # pinned via package.json "packageManager"
+corepack                                    # ships with Node 20+, enables pnpm
+
+# ─── Preinstalled on macOS (verify they exist) ──────────────────────────
+lsof                                        # network-connection enumeration
+ps                                          # PID ownership check before kill
+pfctl                  at /sbin/pfctl       # firewall block/unblock
+sudo                                        # required to invoke pfctl
+
+# ─── Optional ────────────────────────────────────────────────────────────
+virustotal-cli (vt)                         # enables the "VT" reputation button
+                                            # install: brew install virustotal-cli
+                                            # configure: vt init  (needs a VT API key)
+
+# ─── Network (outbound, from the server) ────────────────────────────────
+api.ipify.org          HTTPS               # public-IP detection
+ip-api.com             HTTP                # batch geo lookup (free tier, 45 req/min)
+unpkg.com / jsdelivr   HTTPS               # globe.gl assets, loaded by the browser
+
+# ─── Privileges ──────────────────────────────────────────────────────────
+# /api/block and /api/unblock shell out to `sudo /sbin/pfctl`.
+# For interactive use, configure passwordless sudo scoped to this command:
+#
+#   sudo visudo -f /etc/sudoers.d/netwatcher
+#
+# and add (replace USERNAME):
+#
+#   Cmnd_Alias NETWATCHER_PFCTL = /sbin/pfctl -a netwatcher *, /sbin/pfctl -e
+#   USERNAME  ALL=(root) NOPASSWD: NETWATCHER_PFCTL
+#
+# Without this, block/unblock will fail with an askpass error.
