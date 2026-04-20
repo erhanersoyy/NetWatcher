@@ -37,7 +37,7 @@ Single-process Node.js server: Express backend serves a static vanilla JS fronte
 - **`dns-resolver.ts`** — Reverse DNS via `dns/promises.reverse()`. 30-min cache. Deduplicates concurrent lookups for same IP. Failures return `'-'`.
 - **`process-info.ts`** — Hardcoded DB of ~160 process names mapping to 2-3 word descriptions and `isSystem` flag. Fallback: `com.apple.*` → system. Used for the "?" info badge and kill confirmation on system processes.
 - **`process-kill.ts`** — Verifies PID belongs to current user by comparing numeric uid (not username — `ps -o user=` truncates at 8 chars on macOS), then sends SIGTERM.
-- **`firewall.ts`** — Manages the `netwatcher` pf anchor + `netwatcher_block` table via `sudo /sbin/pfctl` (argv-form, never a shell). Rejects loopback/unspecified IPs to prevent self-lockout. Requires passwordless sudo scoped to `/sbin/pfctl`.
+- **`firewall.ts`** — Manages the `netwatcher` pf anchor + `netwatcher_block` table via `sudo /sbin/pfctl` (argv-form, never a shell). Sudo password is supplied per request by the UI (piped to `sudo -S` over stdin, never stored). Rejects loopback/unspecified IPs to prevent self-lockout.
 - **`virustotal.ts`** — Wraps the `vt ip <ip>` CLI (brew install virustotal-cli; `vt init` for the API key). 10-min in-memory cache.
 
 ### Frontend (`public/`)
