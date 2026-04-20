@@ -23,6 +23,9 @@ pnpm-debug.log*
 .env.local
 .env.*.local
 
+# Runtime data (block history etc.)
+data/
+
 # Claude Code — entire config directory is per-user, not for sharing
 .claude/
 CLAUDE.local.md

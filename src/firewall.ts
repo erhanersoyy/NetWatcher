@@ -1,6 +1,8 @@
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { isIP } from 'node:net';
+import { recordBlock, recordUnblock } from './block-store.js';
+import { lookupSingleIP } from './geolocation.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -110,6 +112,14 @@ export async function blockIP(ip: string, password: string): Promise<{ success: 
   try {
     await ensureAnchor();
     await execFileAsync('sudo', ['-n', '/sbin/pfctl', '-a', ANCHOR, '-t', TABLE, '-T', 'add', ip], { timeout: 5000 });
+    // Record metadata out-of-band — pfctl's table has no notion of timestamps/country.
+    try {
+      const geo = await lookupSingleIP(ip);
+      await recordBlock(ip, geo?.country ?? null);
+    } catch {
+      // If geo or store fails, the pf rule is already in place; don't fail the user action.
+      await recordBlock(ip, null).catch(() => {});
+    }
     return { success: true, message: `Blocked ${ip}` };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -135,6 +145,7 @@ export async function unblockIP(ip: string, password: string): Promise<{ success
   try {
     await ensureAnchor();
     await execFileAsync('sudo', ['-n', '/sbin/pfctl', '-a', ANCHOR, '-t', TABLE, '-T', 'delete', ip], { timeout: 5000 });
+    await recordUnblock(ip).catch(() => {});
     return { success: true, message: `Unblocked ${ip}` };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

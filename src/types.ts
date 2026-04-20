@@ -43,3 +43,21 @@ export interface ProcessInfo {
   isSystemProcess: boolean;
   connections: EnrichedConnection[];
 }
+
+export interface BlockRecord {
+  ip: string;
+  country: string | null;
+  blockedAt: number;
+}
+
+export interface BlockEvent {
+  ip: string;
+  action: 'block' | 'unblock';
+  at: number;
+  country?: string | null;
+}
+
+export interface BlockHistoryResponse {
+  active: BlockRecord[];
+  history: BlockEvent[];
+}
