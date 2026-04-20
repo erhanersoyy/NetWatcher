@@ -34,6 +34,8 @@ export interface EnrichedConnection {
   state: string;
   geo: GeoInfo | null;
   domain: string;
+  bytesIn?: number;
+  bytesOut?: number;
 }
 
 export interface ProcessInfo {
