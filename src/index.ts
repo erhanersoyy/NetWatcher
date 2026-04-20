@@ -2,6 +2,7 @@ import express, { type Request, type Response, type NextFunction } from 'express
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { router } from './routes.js';
+import { shutdownTrafficStream } from './traffic-stream.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -47,3 +48,28 @@ const server = app.listen(PORT, HOST, () => {
   }
   console.log(`\n  NetWatcher running at http://${HOST}:${PORT}\n`);
 });
+
+// Graceful shutdown. Without this, `tsx watch` restarts and plain Ctrl+C
+// can leave the HTTP listener holding port 3847 (EADDRINUSE on next start)
+// and orphan the in-flight `nettop` child spawned by the traffic stream.
+//
+// Flow: stop the traffic sampler so no new nettop gets spawned → close
+// the HTTP server (stops accepting new connections, waits for in-flight
+// to drain) → force-close any long-lived SSE sockets → exit. A 2s
+// watchdog covers the pathological case where a client keeps an SSE
+// connection open despite server.close().
+let shuttingDown = false;
+function shutdown(signal: NodeJS.Signals): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`\n  ${signal} received — shutting down…`);
+  shutdownTrafficStream();
+  server.close(() => process.exit(0));
+  // Express 5 doesn't auto-drop open keep-alive sockets; force them.
+  if (typeof server.closeAllConnections === 'function') {
+    server.closeAllConnections();
+  }
+  setTimeout(() => process.exit(1), 2000).unref();
+}
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
