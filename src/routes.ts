@@ -3,6 +3,7 @@ import { networkInterfaces, hostname } from 'node:os';
 import { getConnections } from './connections.js';
 import { lookupIPs, lookupSingleIP } from './geolocation.js';
 import { reverseLookupBatch } from './dns-resolver.js';
+import { getTrafficSnapshot, trafficKey } from './traffic.js';
 import { getProcessMeta } from './process-info.js';
 import { killProcess } from './process-kill.js';
 import { vtLookup } from './virustotal.js';
@@ -17,9 +18,10 @@ router.get('/api/connections', async (_req, res) => {
 
   // Collect unique remote IPs for batch geolocation + reverse DNS
   const uniqueIPs = [...new Set(connections.map((c) => c.remoteAddress))];
-  const [geoMap, dnsMap] = await Promise.all([
+  const [geoMap, dnsMap, trafficMap] = await Promise.all([
     lookupIPs(uniqueIPs),
     reverseLookupBatch(uniqueIPs),
+    getTrafficSnapshot(),
   ]);
 
   // Group by PID
@@ -39,6 +41,16 @@ router.get('/api/connections', async (_req, res) => {
       processMap.set(conn.pid, proc);
     }
 
+    const protoFamily = conn.protocol.toLowerCase().startsWith('tcp') ? 'tcp' : 'udp';
+    const key = trafficKey(
+      protoFamily,
+      conn.localAddress,
+      conn.localPort,
+      conn.remoteAddress,
+      conn.remotePort,
+    );
+    const stats = trafficMap.get(key);
+
     const enriched: EnrichedConnection = {
       protocol: conn.protocol,
       remoteAddress: conn.remoteAddress,
@@ -48,6 +60,8 @@ router.get('/api/connections', async (_req, res) => {
       state: conn.state,
       geo: geoMap.get(conn.remoteAddress) ?? null,
       domain: dnsMap.get(conn.remoteAddress) ?? '-',
+      bytesIn: stats?.bytesIn,
+      bytesOut: stats?.bytesOut,
     };
     proc.connections.push(enriched);
   }
