@@ -6,7 +6,15 @@ import { lookupSingleIP } from './geolocation.js';
 
 const execFileAsync = promisify(execFile);
 
-const ANCHOR = 'netwatcher';
+// Nested under the `com.apple/*` wildcard that macOS' main ruleset
+// references (`anchor "com.apple/*" all` in /etc/pf.conf). A bare
+// top-level anchor like "netwatcher" is loaded but never evaluated —
+// nothing in the main ruleset descends into it, so pf processes every
+// packet, hits no matching rule, and lets traffic through. Nesting
+// under com.apple/* means pf automatically recurses into our rules.
+// The `250.` numeric prefix keeps us away from Apple's own
+// com.apple.<feature> anchors and pins evaluation order.
+const ANCHOR = 'com.apple/250.netwatcher';
 const TABLE = 'netwatcher_block';
 let anchorInitialized = false;
 
@@ -77,6 +85,16 @@ async function ensureAnchor(): Promise<void> {
     // Already enabled — pfctl -e returns exit 1 if active; ignore.
   }
 
+  // Clean up the legacy top-level `netwatcher` anchor from earlier versions.
+  // It was never referenced by the main ruleset and therefore dormant, but
+  // it can still contain stale table entries that show up in `pfctl -a
+  // netwatcher -t netwatcher_block -T show`, leading to confusing state.
+  try {
+    await execFileAsync('sudo', ['-n', '/sbin/pfctl', '-a', 'netwatcher', '-F', 'all'], { timeout: 5000 });
+  } catch {
+    // Legacy anchor may not exist; that's fine.
+  }
+
   // macOS pf (FreeBSD 4.x-era) is strict about table references in the
   // `from` position — rules without explicit direction can fail to parse.
   // Always specify `in`/`out` and end with `\n` (pfctl expects a trailing newline).
@@ -112,6 +130,23 @@ export async function blockIP(ip: string, password: string): Promise<{ success: 
   try {
     await ensureAnchor();
     await execFileAsync('sudo', ['-n', '/sbin/pfctl', '-a', ANCHOR, '-t', TABLE, '-T', 'add', ip], { timeout: 5000 });
+
+    // Kill existing state-table entries for this IP. Without this, any
+    // in-flight TCP/UDP flow (e.g. a download already in progress) keeps
+    // passing via the state-table's cached `pass` verdict — pf never
+    // re-evaluates rules for established state. Our block only affects
+    // packets that miss the state table and go through rule evaluation.
+    // A single `-k <ip>` matches states in either direction.
+    try {
+      await execFileAsync('sudo', ['-n', '/sbin/pfctl', '-k', ip], { timeout: 5000 });
+    } catch (err) {
+      // Non-fatal: no matching states is not an error for our purposes.
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!/No state/i.test(msg)) {
+        console.warn(`[firewall] pfctl -k ${ip} warning:`, msg);
+      }
+    }
+
     // Record metadata out-of-band — pfctl's table has no notion of timestamps/country.
     try {
       const geo = await lookupSingleIP(ip);

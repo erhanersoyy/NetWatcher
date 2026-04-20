@@ -103,7 +103,11 @@ block drop out quick from any to <netwatcher_block>
 block drop in  quick from <netwatcher_block> to any
 ```
 
-Why this shape: explicit `in` / `out` (macOS pf rejects direction-less rules with `syntax error` on some hosts), no `match` / `nat-to` / `rdr-to` (4.7+ only), loaded at runtime via `pfctl -a netwatcher -f -` (avoids the "tables defined inside an anchor file" boot quirk and survives OS updates).
+Loaded at runtime via `pfctl -a com.apple/250.netwatcher -f -`. The anchor path matters: macOS' main ruleset references `anchor "com.apple/*"` but nothing else, so a bare top-level anchor like `netwatcher` is loaded but never evaluated — every packet sails past it. Nesting under `com.apple/` makes the wildcard recurse into our rules. The `250.` prefix keeps us clear of Apple's own `com.apple.<feature>` anchors and pins evaluation order.
+
+Why this rule shape: explicit `in` / `out` (macOS pf rejects direction-less rules with `syntax error` on some hosts), no `match` / `nat-to` / `rdr-to` (4.7+ only).
+
+Blocking an IP also runs `pfctl -k <ip>` immediately after adding it to the table. pf tracks established flows in a state table with a cached `pass` verdict; without killing matching states, a download in progress keeps flowing because its packets never re-enter rule evaluation. Killing states forces the next packet through the rules, where the new block fires.
 
 References: [PF on Mac OS X](https://manjusri.ucsc.edu/2015/03/10/PF-on-Mac-OS-X/) · [Apple's PF import history](https://callfortesting.org/macpf/) · [macOS pf setup guide](https://iyanmv.medium.com/setting-up-correctly-packet-filter-pf-firewall-on-any-macos-from-sierra-to-big-sur-47e70e062a0e) · [pf.conf(5)](https://man.openbsd.org/pf.conf) · [PF anchors](https://www.openbsd.org/faq/pf/anchors.html) · [pfctl(8)](https://man.openbsd.org/pfctl)
 
