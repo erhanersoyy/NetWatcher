@@ -44,21 +44,7 @@ pnpm typecheck    # tsc --noEmit
 
 ## Block / Unblock setup
 
-Two ways to authorize `pfctl`:
-
-**Option A — type your password each time** (default). The UI shows a sudo dialog on every Block / Unblock; the password is sent to the local server, used once, and never written anywhere.
-
-**Option B — passwordless sudo for `pfctl` only** (skips the dialog):
-
-```bash
-sudo visudo -f /etc/sudoers.d/netwatcher
-```
-```
-Cmnd_Alias NETWATCHER_PFCTL = /sbin/pfctl -a netwatcher *, /sbin/pfctl -e
-YOUR_USERNAME  ALL=(root) NOPASSWD: NETWATCHER_PFCTL
-```
-
-The `Cmnd_Alias` pins sudo to the `netwatcher` anchor — a compromised server can't flush other rules or load arbitrary configs.
+Block / Unblock shells out to `sudo /sbin/pfctl`. The UI shows a sudo dialog on every Block / Unblock; the password is sent once to the local server, piped to `sudo -S` over stdin, and never written anywhere. No `NOPASSWD` / sudoers configuration is used or supported.
 
 ## Architecture
 

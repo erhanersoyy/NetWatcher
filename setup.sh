@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # NetWatcher — one-shot installer.
-# Verifies prerequisites, enables pnpm via corepack, installs deps,
-# and prints the pfctl sudoers hint. Does NOT touch sudoers itself.
+# Verifies prerequisites, enables pnpm via corepack, installs deps.
+# Does NOT touch sudoers.
 #
 # Flags:
 #   -y, --yes    Skip the pre-run confirmation prompt.
@@ -13,7 +13,6 @@ cd "$(dirname "$0")"
 
 # ─── Constants ──────────────────────────────────────────────────────────
 TOTAL_STEPS=7
-CURRENT_USER="${USER:-$(id -un)}"
 
 YELLOW=$'\033[1;33m'
 GREEN=$'\033[1;32m'
@@ -53,8 +52,7 @@ ${BOLD}NetWatcher setup — will run ${TOTAL_STEPS} steps:${RESET}
   ${GREEN}4.${RESET} pnpm via corepack     — enable + activate the version pinned in package.json
   ${GREEN}5.${RESET} Install dependencies  — ${BOLD}pnpm install --frozen-lockfile${RESET} (writes node_modules/)
   ${GREEN}6.${RESET} Typecheck             — ${BOLD}pnpm typecheck${RESET} sanity run
-  ${GREEN}7.${RESET} Post-install checks   — detect ${BOLD}vt${RESET} CLI and passwordless pfctl sudo;
-                            ${DIM}print sudoers hint if needed (does NOT modify sudoers)${RESET}
+  ${GREEN}7.${RESET} Post-install checks   — detect ${BOLD}vt${RESET} CLI (optional reputation button)
 
 ${DIM}Writes to this directory (node_modules/) and to your user-global caches:
 corepack → ~/.cache/node/corepack, pnpm store → ~/Library/pnpm/store
@@ -125,18 +123,7 @@ else
   printf "   %sInstall with: brew install virustotal-cli && vt init%s\n" "$DIM" "$RESET"
 fi
 
-SUDOERS_FILE="/etc/sudoers.d/netwatcher"
-if sudo -n /sbin/pfctl -s info >/dev/null 2>&1; then
-  info "Passwordless sudo for pfctl: OK"
-else
-  warn "Passwordless sudo for pfctl is NOT configured."
-  printf "   The Block/Unblock buttons will fail until you add a sudoers entry.\n"
-  printf "   %sRun:%s\n" "$DIM" "$RESET"
-  printf "     sudo visudo -f %s\n" "$SUDOERS_FILE"
-  printf "   %sAdd (using your current username %s%s%s):%s\n" "$DIM" "$BOLD" "$CURRENT_USER" "$RESET$DIM" "$RESET"
-  printf "     Cmnd_Alias NETWATCHER_PFCTL = /sbin/pfctl -a netwatcher *, /sbin/pfctl -e\n"
-  printf "     %s  ALL=(root) NOPASSWD: NETWATCHER_PFCTL\n" "$CURRENT_USER"
-fi
+printf "   %sBlock / Unblock prompts for your sudo password on each use — no sudoers changes required.%s\n" "$DIM" "$RESET"
 
 echo
 info "Setup complete."

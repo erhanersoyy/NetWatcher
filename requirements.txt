@@ -27,14 +27,6 @@ ip-api.com             HTTP                # batch geo lookup (free tier, 45 req
 unpkg.com / jsdelivr   HTTPS               # globe.gl assets, loaded by the browser
 
 # ─── Privileges ──────────────────────────────────────────────────────────
-# /api/block and /api/unblock shell out to `sudo /sbin/pfctl`.
-# For interactive use, configure passwordless sudo scoped to this command:
-#
-#   sudo visudo -f /etc/sudoers.d/netwatcher
-#
-# and add (replace USERNAME):
-#
-#   Cmnd_Alias NETWATCHER_PFCTL = /sbin/pfctl -a netwatcher *, /sbin/pfctl -e
-#   USERNAME  ALL=(root) NOPASSWD: NETWATCHER_PFCTL
-#
-# Without this, block/unblock will fail with an askpass error.
+# /api/block and /api/unblock shell out to `sudo /sbin/pfctl`. The UI prompts
+# you for your password on every Block / Unblock; it is piped to `sudo -S`
+# over stdin, used once, and never stored. No sudoers / NOPASSWD setup.
