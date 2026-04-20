@@ -5,7 +5,7 @@ A local network-connection dashboard for macOS. Lists every outbound connection 
 ![macOS](https://img.shields.io/badge/platform-macOS-lightgrey)
 ![node](https://img.shields.io/badge/node-%3E%3D20-green)
 
-Everything runs on `127.0.0.1:3847` with `Host` + custom CSRF header validation (DNS-rebinding defense).
+Everything runs on `127.0.0.1:3847` with `Host`.
 
 ## Contents
 
