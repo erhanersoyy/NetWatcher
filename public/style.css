@@ -749,6 +749,69 @@ h1 {
   box-shadow: 0 0 0 2px #58a6ff33;
 }
 
+/* --- Refresh now button spin --- */
+#refreshNowBtn.spinning {
+  opacity: 0.6;
+  pointer-events: none;
+}
+@keyframes refreshSpin { to { transform: rotate(360deg); } }
+#refreshNowBtn.spinning::before {
+  display: inline-block;
+  animation: refreshSpin 0.9s linear infinite;
+}
+
+/* --- Blocked IPs modal --- */
+.blocked-modal {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 12px;
+  padding: 0;
+  max-width: 780px;
+  width: 92%;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.blocked-modal-body {
+  padding: 16px 20px 20px;
+  overflow: auto;
+}
+.blocked-empty {
+  color: #8b949e;
+  font-size: 13px;
+  text-align: center;
+  padding: 28px 12px;
+}
+.blocked-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  color: #c9d1d9;
+}
+.blocked-table thead th {
+  text-align: left;
+  font-weight: 600;
+  color: #8b949e;
+  border-bottom: 1px solid #30363d;
+  padding: 6px 10px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+.blocked-table tbody td {
+  padding: 8px 10px;
+  border-bottom: 1px solid #21262d;
+  vertical-align: middle;
+}
+.blocked-table tbody tr:last-child td {
+  border-bottom: none;
+}
+.blocked-table code {
+  font-family: 'SF Mono', Menlo, monospace;
+  color: #e6edf3;
+}
+
 /* Toast */
 .toast {
   position: fixed;

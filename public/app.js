@@ -15,6 +15,9 @@ const searchInput = document.getElementById('searchInput');
 const sortSelect = document.getElementById('sortSelect');
 const expandAllBtn = document.getElementById('expandAllBtn');
 const collapseAllBtn = document.getElementById('collapseAllBtn');
+const refreshNowBtn = document.getElementById('refreshNowBtn');
+const refreshSelect = document.getElementById('refreshSelect');
+const blockedListBtn = document.getElementById('blockedListBtn');
 
 // State
 const expandedPids = new Set();
@@ -22,6 +25,8 @@ let lastData = null;
 let hostInfo = null;
 let myGlobe = null;
 let blockedIPs = new Set();
+let refreshTimer = null;
+let refreshIntervalMs = 2000;
 
 const OPACITY = 0.3;
 
@@ -428,9 +433,9 @@ function formatVtOutput(raw, success) {
 
 // --- Host Info ---
 
-async function fetchHostInfo() {
+async function fetchHostInfo({ fresh } = { fresh: false }) {
   try {
-    const res = await fetch('/api/host-info');
+    const res = await fetch('/api/host-info' + (fresh ? '?fresh=1' : ''));
     if (!res.ok) return;
     hostInfo = await res.json();
 
@@ -557,6 +562,102 @@ function showConfirmDialog(message, onConfirm) {
   overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
 }
 
+async function showBlockedListModal() {
+  const existing = document.getElementById('blockedListOverlay');
+  if (existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'blockedListOverlay';
+  overlay.className = 'confirm-overlay';
+  overlay.innerHTML = `
+    <div class="blocked-modal">
+      <div class="vt-modal-header">
+        <span class="vt-modal-title">Blocked IPs</span>
+        <button class="vt-modal-close" data-close="1">&times;</button>
+      </div>
+      <div class="blocked-modal-body"><div class="vt-loading">Loading…</div></div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay || e.target.dataset.close === '1') overlay.remove();
+  });
+
+  let data;
+  try {
+    const res = await fetch('/api/block-history');
+    data = await res.json();
+  } catch (err) {
+    overlay.querySelector('.blocked-modal-body').innerHTML =
+      `<div class="vt-output vt-error">Failed to load: ${escapeHtml(err.message)}</div>`;
+    return;
+  }
+
+  const rows = buildBlockedRows(data.history || []);
+  const body = overlay.querySelector('.blocked-modal-body');
+  if (rows.length === 0) {
+    body.innerHTML = '<div class="blocked-empty">No blocks recorded yet.</div>';
+    return;
+  }
+
+  body.innerHTML = `
+    <table class="blocked-table">
+      <thead><tr>
+        <th>IP</th><th>Country</th><th>Blocked At</th><th>Status</th>
+      </tr></thead>
+      <tbody>${rows.map(r => `
+        <tr>
+          <td><code>${escapeHtml(r.ip)}</code></td>
+          <td>${r.country ? escapeHtml(r.country) : '<span class="geo-unknown">-</span>'}</td>
+          <td>${escapeHtml(formatTime(r.blockedAt))}</td>
+          <td>${r.status === 'active'
+            ? '<span class="blocked-tag">ACTIVE</span>'
+            : `<span class="geo-unknown">Unblocked ${escapeHtml(formatTime(r.unblockedAt))}</span>`}</td>
+        </tr>`).join('')}
+      </tbody>
+    </table>
+  `;
+}
+
+// Pair each 'block' event with the next 'unblock' event for the same IP
+// so every row represents one block session (active or closed).
+function buildBlockedRows(history) {
+  const byIp = new Map();
+  for (const ev of history) {
+    if (!byIp.has(ev.ip)) byIp.set(ev.ip, []);
+    byIp.get(ev.ip).push(ev);
+  }
+  const rows = [];
+  for (const [ip, events] of byIp) {
+    events.sort((a, b) => a.at - b.at);
+    let pending = null;
+    for (const ev of events) {
+      if (ev.action === 'block') {
+        if (pending) {
+          // Two blocks in a row without an unblock — treat first as lost/closed.
+          rows.push({ ip, country: pending.country ?? null, blockedAt: pending.at, status: 'unblocked', unblockedAt: pending.at });
+        }
+        pending = ev;
+      } else if (ev.action === 'unblock' && pending) {
+        rows.push({ ip, country: pending.country ?? null, blockedAt: pending.at, status: 'unblocked', unblockedAt: ev.at });
+        pending = null;
+      }
+    }
+    if (pending) {
+      rows.push({ ip, country: pending.country ?? null, blockedAt: pending.at, status: 'active' });
+    }
+  }
+  rows.sort((a, b) => b.blockedAt - a.blockedAt);
+  return rows;
+}
+
+function formatTime(ts) {
+  if (!ts) return '-';
+  const d = new Date(ts);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
 function askSudoPassword(action, ip, onSubmit) {
   const existing = document.getElementById('sudoOverlay');
   if (existing) existing.remove();
@@ -633,10 +734,45 @@ searchInput.addEventListener('input', () => {
   searchTimeout = setTimeout(() => { if (lastData) render(lastData); }, 200);
 });
 
+// --- Refresh orchestration ---
+
+async function refreshAll({ fresh } = { fresh: false }) {
+  // Run independent fetches in parallel. Host info bypasses its server-side cache
+  // only when the user explicitly asked for a fresh pull.
+  await Promise.all([
+    fetchConnections(),
+    fetchHostInfo({ fresh }),
+    fetchBlockedIPs(),
+  ]);
+}
+
+function scheduleRefresh() {
+  if (refreshTimer) {
+    clearInterval(refreshTimer);
+    refreshTimer = null;
+  }
+  if (refreshIntervalMs > 0) {
+    refreshTimer = setInterval(() => { refreshAll({ fresh: false }); }, refreshIntervalMs);
+  }
+}
+
+refreshSelect.addEventListener('change', () => {
+  refreshIntervalMs = parseInt(refreshSelect.value, 10) || 2000;
+  scheduleRefresh();
+});
+
+refreshNowBtn.addEventListener('click', async () => {
+  refreshNowBtn.classList.add('spinning');
+  try {
+    await refreshAll({ fresh: true });
+  } finally {
+    refreshNowBtn.classList.remove('spinning');
+  }
+});
+
+blockedListBtn.addEventListener('click', () => showBlockedListModal());
+
 // --- Init ---
 initGlobe();
-fetchHostInfo();
-fetchBlockedIPs();
-fetchConnections();
-setInterval(fetchConnections, 2000);
-setInterval(fetchBlockedIPs, 10000); // refresh blocked list every 10s
+refreshAll({ fresh: true });
+scheduleRefresh();

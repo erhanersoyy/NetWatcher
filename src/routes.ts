@@ -7,6 +7,7 @@ import { getProcessMeta } from './process-info.js';
 import { killProcess } from './process-kill.js';
 import { vtLookup } from './virustotal.js';
 import { blockIP, unblockIP, getBlockedIPs } from './firewall.js';
+import { getBlockHistory } from './block-store.js';
 import type { ProcessInfo, EnrichedConnection, HostInfo } from './types.js';
 
 export const router: ReturnType<typeof Router> = Router();
@@ -87,11 +88,17 @@ router.get('/api/blocked', async (_req, res) => {
   res.json(ips);
 });
 
+router.get('/api/block-history', async (_req, res) => {
+  const data = await getBlockHistory();
+  res.json(data);
+});
+
 let cachedHostInfo: { data: HostInfo; timestamp: number } | null = null;
 const HOST_INFO_TTL = 5 * 60 * 1000; // 5 minutes
 
-router.get('/api/host-info', async (_req, res) => {
-  if (cachedHostInfo && Date.now() - cachedHostInfo.timestamp < HOST_INFO_TTL) {
+router.get('/api/host-info', async (req, res) => {
+  const bypassCache = req.query.fresh === '1';
+  if (!bypassCache && cachedHostInfo && Date.now() - cachedHostInfo.timestamp < HOST_INFO_TTL) {
     res.json(cachedHostInfo.data);
     return;
   }
