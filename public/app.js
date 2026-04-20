@@ -95,6 +95,26 @@ function formatBytes(n) {
   return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
 }
 
+/**
+ * Mirror of `trafficKey` in `src/traffic.ts`. Must stay in sync so that
+ * keys emitted by the SSE stream resolve to the correct `<tr>` DOM nodes.
+ */
+function clientTrafficKey(protocol, localIP, localPort, remoteIP, remotePort) {
+  const normalize = (ip) => {
+    let out = String(ip).replace(/%.+$/, '');
+    out = out.replace(/^fe80:[0-9a-f]{1,4}::/i, 'fe80::');
+    return out.toLowerCase();
+  };
+  const p = String(protocol).toLowerCase();
+  const proto = p.startsWith('tcp') ? 'tcp' : p.startsWith('udp') ? 'udp' : p;
+  return `${proto}|${normalize(localIP)}|${localPort}|${normalize(remoteIP)}|${remotePort}`;
+}
+
+// Live per-connection byte counters, updated by the SSE stream. Read at
+// render time so a re-render (filter toggle, refresh poll) doesn't flash
+// back to stale server values between stream ticks.
+const liveTraffic = new Map();
+
 function isPrivateIP(addr) {
   if (addr.startsWith('10.') || addr.startsWith('192.168.') || addr.startsWith('127.')) return true;
   if (addr === '0.0.0.0' || addr === '::' || addr === '::1' || addr.startsWith('169.254.') || addr.startsWith('fe80:')) return true;
@@ -213,14 +233,26 @@ function renderProcess(proc) {
         }
       }
 
-      const rxCell = conn.bytesIn !== undefined
-        ? `<span class="bytes-cell bytes-rx" title="${conn.bytesIn} bytes received">${formatBytes(conn.bytesIn)}</span>`
-        : '<span class="geo-unknown">-</span>';
-      const txCell = conn.bytesOut !== undefined
-        ? `<span class="bytes-cell bytes-tx" title="${conn.bytesOut} bytes sent">${formatBytes(conn.bytesOut)}</span>`
-        : '<span class="geo-unknown">-</span>';
+      const tKey = clientTrafficKey(
+        conn.protocol,
+        conn.localAddress,
+        conn.localPort,
+        conn.remoteAddress,
+        conn.remotePort,
+      );
+      // Prefer the SSE stream's value over whatever the poll response
+      // carried — the stream updates every second; the poll may be 5min old.
+      const live = liveTraffic.get(tKey);
+      const rxBytes = live ? live.bytesIn : conn.bytesIn;
+      const txBytes = live ? live.bytesOut : conn.bytesOut;
+      const rxCell = rxBytes !== undefined
+        ? `<span class="bytes-cell bytes-rx" title="${rxBytes} bytes received">${formatBytes(rxBytes)}</span>`
+        : '<span class="bytes-cell bytes-rx geo-unknown">-</span>';
+      const txCell = txBytes !== undefined
+        ? `<span class="bytes-cell bytes-tx" title="${txBytes} bytes sent">${formatBytes(txBytes)}</span>`
+        : '<span class="bytes-cell bytes-tx geo-unknown">-</span>';
 
-      return `<tr class="${isBlocked ? 'row-blocked' : ''}">
+      return `<tr class="${isBlocked ? 'row-blocked' : ''}" data-traffic-key="${escapeHtml(tKey)}">
         <td>${escapeHtml(conn.protocol)}</td>
         <td>${escapeHtml(conn.remoteAddress)} ${blockedTag}</td>
         <td>${conn.remotePort}</td>
@@ -1162,40 +1194,356 @@ async function showBlockedListModal() {
     if (e.target === overlay || e.target.dataset.close === '1') overlay.remove();
   });
 
+  await renderBlockedListBody(overlay, { selectMode: false });
+}
+
+// Populate the modal body. Called on open and after any (un)block action to
+// refresh both the row list and the header toolbar in-place, preserving the
+// current select-mode state.
+async function renderBlockedListBody(overlay, { selectMode }) {
+  const body = overlay.querySelector('.blocked-modal-body');
+  body.innerHTML = '<div class="vt-loading">Loading…</div>';
+
   let data;
   try {
     const res = await fetch('/api/block-history');
     data = await res.json();
   } catch (err) {
-    overlay.querySelector('.blocked-modal-body').innerHTML =
-      `<div class="vt-output vt-error">Failed to load: ${escapeHtml(err.message)}</div>`;
+    body.innerHTML = `<div class="vt-output vt-error">Failed to load: ${escapeHtml(err.message)}</div>`;
     return;
   }
 
   const rows = buildBlockedRows(data.history || []);
-  const body = overlay.querySelector('.blocked-modal-body');
+  const hasActive = rows.some(r => r.status === 'active');
+  const effectiveSelect = selectMode && hasActive;
+
+  const toolbar = `
+    <div class="blocked-toolbar">
+      <button class="blocked-add-ip" data-action="manual-add">+ Block IP…</button>
+      <button class="blocked-select-toggle ${effectiveSelect ? 'active' : ''}" ${hasActive ? '' : 'disabled'} data-action="toggle-select">
+        ${effectiveSelect ? 'Cancel' : 'Select'}
+      </button>
+      <button class="blocked-bulk-unblock" data-action="unblock-selected" ${effectiveSelect ? '' : 'hidden'} disabled>
+        Unblock Selected <span class="blocked-sel-count">(0)</span>
+      </button>
+    </div>
+  `;
+
   if (rows.length === 0) {
-    body.innerHTML = '<div class="blocked-empty">No blocks recorded yet.</div>';
+    body.innerHTML = toolbar + '<div class="blocked-empty">No blocks recorded yet.</div>';
+    wireBlockedToolbar(body, overlay, effectiveSelect);
     return;
   }
 
-  body.innerHTML = `
-    <table class="blocked-table">
+  body.innerHTML = toolbar + `
+    <table class="blocked-table ${effectiveSelect ? 'select-mode' : ''}">
       <thead><tr>
+        ${effectiveSelect ? '<th class="blocked-col-sel"></th>' : ''}
         <th>IP</th><th>Country</th><th>Blocked At</th><th>Status</th>
+        <th class="blocked-col-action"></th>
       </tr></thead>
-      <tbody>${rows.map(r => `
-        <tr>
-          <td><code>${escapeHtml(r.ip)}</code></td>
+      <tbody>${rows.map(r => {
+        const isActive = r.status === 'active';
+        const ipEsc = escapeHtml(r.ip);
+        return `<tr data-ip="${ipEsc}" data-active="${isActive ? '1' : '0'}">
+          ${effectiveSelect ? `<td class="blocked-col-sel">${isActive
+            ? `<input type="checkbox" class="blocked-row-check" aria-label="Select ${ipEsc}">`
+            : ''}</td>` : ''}
+          <td><code>${ipEsc}</code></td>
           <td>${r.country ? escapeHtml(r.country) : '<span class="geo-unknown">-</span>'}</td>
           <td>${escapeHtml(formatTime(r.blockedAt))}</td>
-          <td>${r.status === 'active'
+          <td>${isActive
             ? '<span class="blocked-tag">ACTIVE</span>'
-            : `<span class="geo-unknown">Unblocked ${escapeHtml(formatTime(r.unblockedAt))}</span>`}</td>
-        </tr>`).join('')}
+            : r.status === 'superseded'
+              ? `<span class="geo-unknown">Replaced ${escapeHtml(formatTime(r.unblockedAt))}</span>`
+              : `<span class="geo-unknown">Unblocked ${escapeHtml(formatTime(r.unblockedAt))}</span>`}</td>
+          <td class="blocked-col-action">
+            ${isActive
+              ? `<button class="blocked-row-unblock" data-unblock="${ipEsc}">Unblock</button>`
+              : `<div class="blocked-row-actions">
+                   <button class="blocked-row-reblock icon-btn" data-reblock="${ipEsc}" title="Re-block ${ipEsc}" aria-label="Re-block">
+                     <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                       <path d="M21 12a9 9 0 1 1-3-6.7"/>
+                       <polyline points="21 4 21 10 15 10"/>
+                     </svg>
+                   </button>
+                   <button class="blocked-row-remove icon-btn" data-remove="${ipEsc}"
+                     data-blocked-at="${r.blockedAt}"
+                     ${r.status === 'unblocked' ? `data-unblocked-at="${r.unblockedAt}"` : ''}
+                     title="Delete this entry" aria-label="Delete row">
+                     <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                       <polyline points="3 6 5 6 21 6"/>
+                       <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+                       <path d="M10 11v6M14 11v6"/>
+                       <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+                     </svg>
+                   </button>
+                 </div>`}
+          </td>
+        </tr>`;
+      }).join('')}
       </tbody>
     </table>
   `;
+  wireBlockedToolbar(body, overlay, effectiveSelect);
+
+}
+
+function wireBlockedToolbar(body, overlay, selectMode) {
+  const toggleBtn = body.querySelector('[data-action="toggle-select"]');
+  const bulkBtn = body.querySelector('[data-action="unblock-selected"]');
+  const addBtn = body.querySelector('[data-action="manual-add"]');
+  const countEl = body.querySelector('.blocked-sel-count');
+
+  const updateBulkState = () => {
+    const n = body.querySelectorAll('.blocked-row-check:checked').length;
+    if (countEl) countEl.textContent = `(${n})`;
+    if (bulkBtn) bulkBtn.disabled = n === 0;
+  };
+
+  if (toggleBtn) {
+    toggleBtn.addEventListener('click', () => {
+      renderBlockedListBody(overlay, { selectMode: !selectMode });
+    });
+  }
+
+  if (addBtn) {
+    addBtn.addEventListener('click', () => blockIPManualAction(overlay, selectMode));
+  }
+
+  body.querySelectorAll('.blocked-row-check').forEach(cb => {
+    cb.addEventListener('change', updateBulkState);
+  });
+
+  if (bulkBtn) {
+    bulkBtn.addEventListener('click', () => {
+      const ips = Array.from(body.querySelectorAll('.blocked-row-check:checked'))
+        .map(cb => cb.closest('tr')?.dataset.ip)
+        .filter(Boolean);
+      if (ips.length === 0) return;
+      unblockBulkAction(ips, overlay);
+    });
+  }
+
+  // Per-row Unblock
+  body.querySelectorAll('.blocked-row-unblock').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const ip = btn.dataset.unblock;
+      if (!ip) return;
+      askSudoPassword('Unblock', ip, async (password) => {
+        if (!password) return;
+        try {
+          const result = await sendFirewallRequest(`/api/unblock/${encodeURIComponent(ip)}`, ip, password);
+          password = '';
+          showToast(result.message, result.success ? 'success' : 'error');
+          if (result.success) {
+            blockedIPs.delete(ip);
+            if (lastData) render(lastData);
+            await renderBlockedListBody(overlay, { selectMode });
+          }
+        } catch (err) {
+          showToast('Failed to unblock IP: ' + err.message, 'error');
+        }
+      });
+    });
+  });
+
+  // Per-row Remove — delete all history events for the IP (unblocked rows only).
+  // Server refuses if the IP is still actively blocked, so this is a safe op.
+  // If the same IP has multiple historical sessions, deleting from any one
+  // removes them all — the user typically expects "clear this IP from history".
+  body.querySelectorAll('.blocked-row-remove').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (btn.disabled) return;
+      const ip = btn.dataset.remove;
+      const blockedAt = btn.dataset.blockedAt;
+      if (!ip || !blockedAt) return;
+      // Guard against double-click racing the in-flight DELETE.
+      btn.disabled = true;
+      try {
+        // Only send unblockedAt for rows that actually had an unblock
+        // event. For 'superseded' rows the row's end time is another
+        // block's timestamp, not a real unblock record to delete.
+        const q = new URLSearchParams({ blockedAt });
+        if (btn.dataset.unblockedAt) q.set('unblockedAt', btn.dataset.unblockedAt);
+        const res = await fetch(`/api/block-history/${encodeURIComponent(ip)}?${q}`, {
+          method: 'DELETE',
+          headers: CSRF_HEADER,
+        });
+        const result = await res.json();
+        if (res.ok && result.success) {
+          const n = result.removed ?? 0;
+          showToast(
+            n === 0 ? `Nothing to remove for ${ip}` : `Removed row for ${ip}`,
+            'success',
+          );
+          await renderBlockedListBody(overlay, { selectMode });
+        } else {
+          showToast(result.message || 'Failed to remove row', 'error');
+        }
+      } catch (err) {
+        showToast('Failed to remove row: ' + err.message, 'error');
+      } finally {
+        if (btn.isConnected) btn.disabled = false;
+      }
+    });
+  });
+
+  // Per-row Reblock (unblocked history rows)
+  body.querySelectorAll('.blocked-row-reblock').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const ip = btn.dataset.reblock;
+      if (!ip) return;
+      askSudoPassword('Block', ip, async (password) => {
+        if (!password) return;
+        try {
+          const result = await sendFirewallRequest(`/api/block/${encodeURIComponent(ip)}`, ip, password);
+          password = '';
+          showToast(result.message, result.success ? 'success' : 'error');
+          if (result.success) {
+            blockedIPs.add(ip);
+            if (lastData) render(lastData);
+            await renderBlockedListBody(overlay, { selectMode });
+          }
+        } catch (err) {
+          showToast('Failed to reblock IP: ' + err.message, 'error');
+        }
+      });
+    });
+  });
+}
+
+// Client-side IP sanity check — stops obvious typos before prompting the
+// user for their sudo password. The server re-validates with net.isIP()
+// and rejects loopback/unspecified, so this is a UX filter, not security.
+// Accepts dotted-quad IPv4 and colon-separated IPv6 (including `::` and
+// `::ffff:1.2.3.4` forms).
+function looksLikeIP(s) {
+  if (typeof s !== 'string') return false;
+  const v = s.trim();
+  if (v.length === 0 || v.length > 45) return false;
+  // IPv4: four 1-3 digit octets separated by dots.
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(v)) {
+    return v.split('.').every((o) => Number(o) <= 255);
+  }
+  // IPv6: must contain a colon, only hex/colon/dot (for ::ffff:v4).
+  if (v.includes(':') && /^[0-9a-fA-F:.]+$/.test(v)) return true;
+  return false;
+}
+
+// Dialog: manual IP entry → sudo prompt → /api/block. Reused styling from
+// the sudo-dialog so theming stays consistent.
+function blockIPManualAction(overlay, selectMode) {
+  const existing = document.getElementById('manualBlockOverlay');
+  if (existing) existing.remove();
+
+  const dialog = document.createElement('div');
+  dialog.id = 'manualBlockOverlay';
+  dialog.className = 'confirm-overlay';
+  dialog.innerHTML = `
+    <div class="confirm-dialog sudo-dialog">
+      <div class="confirm-icon">&#9888;</div>
+      <div class="confirm-message">
+        <div class="sudo-title">Block IP manually</div>
+        <div class="sudo-body">Add an IPv4 or IPv6 address to the <code>pfctl</code> block table without picking it from the connection list.</div>
+      </div>
+      <input type="text" class="sudo-input manual-ip-input" placeholder="e.g. 1.2.3.4" autocomplete="off" autocapitalize="off" spellcheck="false" />
+      <div class="confirm-actions">
+        <button class="confirm-btn confirm-cancel">Cancel</button>
+        <button class="confirm-btn confirm-kill manual-submit">Continue</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(dialog);
+  const input = dialog.querySelector('.manual-ip-input');
+  input.focus();
+
+  const close = () => dialog.remove();
+  const submit = () => {
+    const ip = input.value.trim();
+    if (!looksLikeIP(ip)) {
+      showToast('Invalid IP format', 'error');
+      input.focus();
+      return;
+    }
+    close();
+    askSudoPassword('Block', ip, async (password) => {
+      if (!password) return;
+      try {
+        const result = await sendFirewallRequest(`/api/block/${encodeURIComponent(ip)}`, ip, password);
+        password = '';
+        showToast(result.message, result.success ? 'success' : 'error');
+        if (result.success) {
+          blockedIPs.add(ip);
+          if (lastData) render(lastData);
+          await renderBlockedListBody(overlay, { selectMode });
+        }
+      } catch (err) {
+        showToast('Failed to block IP: ' + err.message, 'error');
+      }
+    });
+  };
+
+  dialog.querySelector('.confirm-cancel').addEventListener('click', close);
+  dialog.querySelector('.manual-submit').addEventListener('click', submit);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); submit(); }
+    else if (e.key === 'Escape') { e.preventDefault(); close(); }
+  });
+  dialog.addEventListener('click', (e) => { if (e.target === dialog) close(); });
+}
+
+// Prompt for sudo once and run /api/unblock for each selected IP sequentially.
+// - Sequential (not parallel): keeps server-side pfctl timestamp coherent.
+// - try/finally on the password ref so a thrown error can't leave it live.
+// - Short-circuit on sudo-auth failure so one typo doesn't burn N requests.
+function unblockBulkAction(ips, overlay) {
+  // Representative target for the sudo dialog body.
+  const representative = ips.length === 1
+    ? ips[0]
+    : `${ips[0]} + ${ips.length - 1} more`;
+  askSudoPassword(`Unblock ${ips.length} IP${ips.length === 1 ? '' : 's'}`, representative, async (password) => {
+    if (!password) return;
+    let ok = 0;
+    let fail = 0;
+    let aborted = false;
+    try {
+      for (const ip of ips) {
+        try {
+          const result = await sendFirewallRequest(
+            `/api/unblock/${encodeURIComponent(ip)}`, ip, password,
+          );
+          if (result.success) {
+            ok += 1;
+            blockedIPs.delete(ip);
+          } else {
+            fail += 1;
+            // Abort the batch on sudo-auth failure — retrying with the same
+            // wrong password will just queue more failures.
+            if (typeof result.message === 'string' && /sudo authentication/i.test(result.message)) {
+              aborted = true;
+              break;
+            }
+          }
+        } catch {
+          fail += 1;
+        }
+      }
+    } finally {
+      // Defense: overwrite the local closure reference no matter how the
+      // loop exited (success, break, exception).
+      password = '';
+    }
+    const remaining = ips.length - ok - fail;
+    const msg = aborted
+      ? `Aborted — sudo auth failed. Unblocked ${ok}, skipped ${remaining}.`
+      : fail === 0
+        ? `Unblocked ${ok} IP${ok === 1 ? '' : 's'}`
+        : `Unblocked ${ok}, failed ${fail}`;
+    showToast(msg, fail === 0 && !aborted ? 'success' : 'error');
+    if (lastData) render(lastData);
+    await renderBlockedListBody(overlay, { selectMode: false });
+  });
 }
 
 // Pair each 'block' event with the next 'unblock' event for the same IP
@@ -1212,8 +1560,19 @@ function buildBlockedRows(history) {
     let pending = null;
     for (const ev of events) {
       if (ev.action === 'block') {
+        // Two consecutive 'block' events with no 'unblock' between them
+        // means the previous session was superseded (e.g. double-block
+        // via manual-add or API reordering). End the prior session at
+        // the *new* block's timestamp so the row reads as "replaced at
+        // <time>" instead of fabricating an unblock time.
         if (pending) {
-          rows.push({ ip, country: pending.country ?? null, blockedAt: pending.at, status: 'unblocked', unblockedAt: pending.at });
+          rows.push({
+            ip,
+            country: pending.country ?? null,
+            blockedAt: pending.at,
+            status: 'superseded',
+            unblockedAt: ev.at,
+          });
         }
         pending = ev;
       } else if (ev.action === 'unblock' && pending) {
@@ -1225,7 +1584,9 @@ function buildBlockedRows(history) {
       rows.push({ ip, country: pending.country ?? null, blockedAt: pending.at, status: 'active' });
     }
   }
-  rows.sort((a, b) => b.blockedAt - a.blockedAt);
+  // Active first (users expect current state at the top), then by blockedAt desc.
+  const statusRank = (s) => (s === 'active' ? 0 : 1);
+  rows.sort((a, b) => statusRank(a.status) - statusRank(b.status) || b.blockedAt - a.blockedAt);
   return rows;
 }
 
@@ -1391,7 +1752,68 @@ function flickerCounter(el) {
   el.classList.add('counter-flicker');
 }
 
+/**
+ * SSE subscription to live per-connection byte counters.
+ *
+ * The browser's EventSource handles reconnect automatically, so we don't
+ * need back-off logic here. On each `delta` event we merge into the
+ * `liveTraffic` Map and patch any matching `<tr>` in place — no full
+ * re-render. If the row isn't currently in the DOM (e.g. its process
+ * is collapsed / filtered out), the value still lands in `liveTraffic`
+ * so the next render picks it up.
+ */
+function connectTrafficStream() {
+  let es;
+  try {
+    es = new EventSource('/api/traffic-stream');
+  } catch (err) {
+    console.warn('[traffic-stream] EventSource unsupported:', err);
+    return;
+  }
+
+  es.addEventListener('delta', (ev) => {
+    let arr;
+    try {
+      arr = JSON.parse(ev.data);
+    } catch {
+      return;
+    }
+    if (!Array.isArray(arr)) return;
+
+    for (const e of arr) {
+      if (!e || typeof e.key !== 'string') continue;
+      liveTraffic.set(e.key, { bytesIn: e.bytesIn | 0, bytesOut: e.bytesOut | 0 });
+      // Attribute-selector escape: keys are ASCII-safe (our trafficKey
+      // output is lowercase hex + digits + `|` + `:` + `.`) but CSS.escape
+      // covers us in any edge case.
+      const sel = `tr[data-traffic-key="${CSS.escape(e.key)}"]`;
+      const row = document.querySelector(sel);
+      if (!row) continue;
+      const rxEl = row.querySelector('.bytes-rx');
+      const txEl = row.querySelector('.bytes-tx');
+      if (rxEl) {
+        rxEl.textContent = formatBytes(e.bytesIn);
+        rxEl.title = `${e.bytesIn} bytes received`;
+        rxEl.classList.remove('geo-unknown');
+      }
+      if (txEl) {
+        txEl.textContent = formatBytes(e.bytesOut);
+        txEl.title = `${e.bytesOut} bytes sent`;
+        txEl.classList.remove('geo-unknown');
+      }
+    }
+  });
+
+  // EventSource reconnects on its own; just log transient errors.
+  es.addEventListener('error', () => {
+    // readyState === 0 means EventSource is attempting to reconnect.
+    // Nothing actionable here; keep the liveTraffic cache warm so the UI
+    // doesn't flash back to stale poll values while we're offline.
+  });
+}
+
 // --- Init ---
 initGlobe();
+connectTrafficStream();
 refreshAll({ fresh: true });
 scheduleRefresh();

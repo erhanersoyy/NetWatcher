@@ -1087,6 +1087,131 @@ body:not(.globe-pinned) .list-toggle-btn {
   color: #e6edf3;
 }
 
+/* Toolbar (Select / Unblock Selected) */
+.blocked-toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+.blocked-select-toggle,
+.blocked-bulk-unblock,
+.blocked-add-ip,
+.blocked-row-unblock,
+.blocked-row-reblock {
+  font-family: 'SF Mono', Menlo, monospace;
+  font-size: 11px;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  padding: 5px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  background: transparent;
+  color: var(--neon, #7ef9ff);
+  border: 1px solid var(--neon-soft, #7ef9ff66);
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.blocked-select-toggle:hover:not(:disabled),
+.blocked-bulk-unblock:hover:not(:disabled),
+.blocked-add-ip:hover:not(:disabled),
+.blocked-row-unblock:hover:not(:disabled),
+.blocked-row-reblock:hover:not(:disabled) {
+  background: var(--neon-soft, #7ef9ff22);
+  color: #e6edf3;
+  border-color: var(--neon, #7ef9ff);
+}
+.blocked-select-toggle:disabled,
+.blocked-bulk-unblock:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.blocked-select-toggle.active {
+  background: var(--neon-soft, #7ef9ff33);
+  color: #e6edf3;
+  border-color: var(--neon, #7ef9ff);
+}
+.blocked-bulk-unblock[hidden] { display: none; }
+.blocked-sel-count {
+  font-size: 10px;
+  opacity: 0.75;
+  margin-left: 2px;
+}
+
+/* Per-row Unblock / select column */
+.blocked-col-sel { width: 28px; }
+.blocked-col-action { width: 88px; text-align: right; white-space: nowrap; }
+.blocked-row-check {
+  accent-color: var(--neon, #7ef9ff);
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+}
+.blocked-row-unblock {
+  padding: 3px 10px;
+  font-size: 10px;
+}
+
+/* Icon buttons (Reblock / Remove) — flex container, uniform square size,
+   no overlap. */
+.blocked-row-actions {
+  display: inline-flex;
+  gap: 6px;
+  justify-content: flex-end;
+  align-items: center;
+}
+.icon-btn {
+  width: 26px;
+  height: 24px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.icon-btn svg { display: block; }
+
+/* Reblock uses the neon accent like the rest of the toolbar */
+.blocked-row-reblock.icon-btn {
+  color: var(--neon, #7ef9ff);
+  border: 1px solid var(--neon-soft, #7ef9ff66);
+}
+.blocked-row-reblock.icon-btn:hover {
+  background: var(--neon-soft, #7ef9ff22);
+  color: #e6edf3;
+  border-color: var(--neon, #7ef9ff);
+}
+
+/* Remove uses the destructive red so it visually distinct */
+.blocked-row-remove.icon-btn {
+  color: #f85149;
+  border: 1px solid #f8514966;
+  margin-left: 0;
+  font-size: inherit;
+  font-family: inherit;
+}
+.blocked-row-remove.icon-btn:hover {
+  background: #f8514922;
+  color: #ff6b6b;
+  border-color: #f85149;
+}
+.icon-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+/* Manual-add button sits left of the Select toggle; push select/bulk to the right. */
+.blocked-add-ip { margin-right: auto; }
+
+/* Manual-block dialog input */
+.manual-ip-input {
+  font-family: 'SF Mono', Menlo, monospace;
+  letter-spacing: 0.5px;
+}
+
 /* Toast */
 .toast {
   position: fixed;
