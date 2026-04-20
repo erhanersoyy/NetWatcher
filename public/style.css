@@ -280,6 +280,10 @@ h1 .title-inner { position: relative; }
   flex: 1;
   overflow-y: auto;
   min-width: 0;
+  /* Animated collapse when the globe is pinned. No opacity — it creates a
+     stacking context that would also fade the position:fixed pin button. */
+  transition: flex-basis 260ms ease, flex-grow 260ms ease,
+              visibility 0s linear 260ms;
 }
 
 .right-panel {
@@ -289,6 +293,27 @@ h1 .title-inner { position: relative; }
   display: flex;
   flex-direction: column;
   background: #0d1117;
+  transition: width 260ms ease, min-width 260ms ease, border-left-color 260ms ease;
+}
+
+/* --- Pinned globe: left panel slides away, right panel takes over. --- */
+body.globe-pinned .left-panel {
+  flex: 0 0 0 !important;
+  min-width: 0;
+  width: 0;
+  overflow: hidden;
+  pointer-events: none;
+  /* Hide at the end of the collapse so the now-invisible filter row can't
+     still grab tab/focus. The pin button itself pops to position:fixed with
+     visibility:visible, escaping this. */
+  visibility: hidden;
+  transition: flex-basis 260ms ease, flex-grow 260ms ease,
+              visibility 0s linear 260ms;
+}
+body.globe-pinned .right-panel {
+  width: 100%;
+  min-width: 0;
+  border-left-color: transparent;
 }
 
 .globe-container {
@@ -297,66 +322,46 @@ h1 .title-inner { position: relative; }
   overflow: hidden;
 }
 
-.globe-container.fullscreen {
-  position: fixed;
-  inset: 0;
-  width: 100vw;
-  height: 100vh;
-  z-index: 9000;
-  background: var(--bg);
-  border: none;
-}
-
-/* When the globe goes fullscreen, hide the page chrome so nothing peeks through. */
-body.globe-fullscreen-active header,
-body.globe-fullscreen-active .host-info-bar,
-body.globe-fullscreen-active .left-panel {
-  display: none !important;
-}
-body.globe-fullscreen-active .content-layout { height: 100vh; }
-body.globe-fullscreen-active .right-panel { width: 100vw; min-width: 0; border: none; }
-
-.globe-fullscreen-btn {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  z-index: 9999;
-  background: rgba(13, 17, 23, 0.78);
-  color: var(--neon);
-  border: 1px solid var(--neon-soft);
-  border-radius: 6px;
-  padding: 6px 10px;
-  cursor: pointer;
+/* --- List-toggle button (sits at the left of the host-info bar).
+   Pressed: slides the process-detail panel in from the left. --- */
+.list-toggle-btn {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  font-family: 'SF Mono', 'Fira Code', monospace;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.5px;
-  backdrop-filter: blur(4px);
-  -webkit-backdrop-filter: blur(4px);
-  box-shadow: 0 0 0 1px rgba(57, 255, 20, 0.05), 0 0 12px rgba(57, 255, 20, 0.12);
-  transition: all 0.15s;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  margin-right: 4px;
+  background: rgba(13, 17, 23, 0.6);
+  color: var(--neon);
+  border: 1px solid var(--neon-soft);
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, box-shadow 0.15s, color 0.15s;
+  flex-shrink: 0;
+  align-self: center;
 }
-.globe-fullscreen-btn:hover {
+.list-toggle-btn:hover {
   background: rgba(57, 255, 20, 0.14);
   border-color: var(--neon);
-  box-shadow: 0 0 14px rgba(57, 255, 20, 0.35);
+  box-shadow: 0 0 10px rgba(57, 255, 20, 0.35);
   color: #f0f6fc;
 }
-.globe-fullscreen-btn .fs-label { line-height: 1; }
-.globe-fullscreen-btn .icon-collapse { display: none; }
-.globe-container.fullscreen .globe-fullscreen-btn .icon-expand { display: none; }
-.globe-container.fullscreen .globe-fullscreen-btn .icon-collapse { display: inline-block; }
-.globe-container.fullscreen .globe-fullscreen-btn::after {
-  content: "ESC";
-  margin-left: 4px;
-  padding: 1px 5px;
-  font-size: 9px;
-  color: #8b949e;
-  border: 1px solid var(--border);
-  border-radius: 3px;
+.list-toggle-btn:focus-visible {
+  outline: none;
+  border-color: var(--neon);
+  box-shadow: 0 0 0 2px rgba(57, 255, 20, 0.35);
+}
+.list-toggle-btn .icon-hide-list { display: none; }
+.list-toggle-btn .icon-show-list { display: inline-block; }
+/* When the list is visible (body has no globe-pinned class), swap icon to a back-arrow. */
+body:not(.globe-pinned) .list-toggle-btn .icon-show-list { display: none; }
+body:not(.globe-pinned) .list-toggle-btn .icon-hide-list { display: inline-block; }
+body:not(.globe-pinned) .list-toggle-btn {
+  background: rgba(57, 255, 20, 0.14);
+  border-color: var(--neon);
+  color: #f0f6fc;
+  box-shadow: 0 0 10px rgba(57, 255, 20, 0.25);
 }
 
 /* Filters */
@@ -878,6 +883,24 @@ body.globe-fullscreen-active .right-panel { width: 100vw; min-width: 0; border: 
 
 .legend-dot.home { background: #58a6ff; box-shadow: 0 0 4px #58a6ff88; }
 .legend-dot.dest { background: #f97316; box-shadow: 0 0 4px #f9731688; }
+.legend-dot.new  {
+  background: #ffffff;
+  box-shadow: 0 0 6px #ffffffcc, 0 0 10px var(--neon-soft);
+  animation: legendPulseNew 1.2s ease-in-out infinite;
+}
+.legend-dot.dying {
+  background: var(--magenta);
+  box-shadow: 0 0 6px var(--magenta), 0 0 10px #ff2bd688;
+  animation: legendPulseDying 0.7s steps(2, end) infinite;
+}
+@keyframes legendPulseNew {
+  0%, 100% { box-shadow: 0 0 6px #ffffffcc, 0 0 10px var(--neon-soft); }
+  50%      { box-shadow: 0 0 8px var(--neon), 0 0 16px var(--neon-soft); }
+}
+@keyframes legendPulseDying {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.35; }
+}
 
 /* --- Confirm dialog --- */
 .confirm-overlay {
@@ -1109,4 +1132,118 @@ body.globe-fullscreen-active .right-panel { width: 100vw; min-width: 0; border: 
     border-left: none;
     border-top: 1px solid #30363d;
   }
+}
+
+/* --- Top Talkers panel --- */
+.globe-talkers {
+  position: absolute;
+  /* Sit below the pin button (which occupies top:12px right:12px z:9999). */
+  top: 48px;
+  right: 12px;
+  width: 200px;
+  background: linear-gradient(180deg, #161b22ee 0%, #0d1117ee 100%);
+  border: 1px solid var(--neon-dim);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-family: 'SF Mono', ui-monospace, Menlo, monospace;
+  font-size: 11px;
+  color: #c9d1d9;
+  z-index: 6;
+  box-shadow: 0 0 14px rgba(57, 255, 20, 0.06), 0 2px 8px rgba(0,0,0,0.35);
+  pointer-events: none;
+}
+
+.talkers-header {
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  color: var(--neon);
+  text-shadow: 0 0 4px var(--neon-soft);
+  margin-bottom: 6px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--neon-dim);
+}
+
+.talkers-list { display: flex; flex-direction: column; gap: 3px; }
+
+.talkers-empty {
+  color: #6e7681;
+  font-style: italic;
+  text-align: center;
+  padding: 6px 0;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+}
+
+.talker-row {
+  display: grid;
+  grid-template-columns: 18px 1fr auto 14px;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  color: #c9d1d9;
+  transition: background 0.15s ease, transform 0.15s ease;
+}
+
+.talker-rank {
+  color: var(--neon);
+  font-weight: 600;
+  font-size: 10px;
+  text-align: right;
+  opacity: 0.8;
+}
+
+.talker-loc {
+  color: #c9d1d9;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.talker-bytes {
+  color: #8b949e;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.talker-spark {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #30363d;
+  box-shadow: none;
+  transition: background 0.2s ease, box-shadow 0.2s ease;
+}
+
+.talker-spark.active {
+  background: var(--neon);
+  box-shadow: 0 0 6px var(--neon-soft), 0 0 12px var(--neon-dim);
+  animation: talkerSparkPulse 0.9s ease-in-out infinite;
+}
+
+.talker-bump {
+  animation: talkerBump 0.45s ease-out;
+}
+
+@keyframes talkerSparkPulse {
+  0%, 100% { transform: scale(1);   opacity: 1; }
+  50%      { transform: scale(1.25); opacity: 0.7; }
+}
+
+@keyframes talkerBump {
+  0%   { background: rgba(57, 255, 20, 0.18); transform: translateX(0); }
+  30%  { background: rgba(57, 255, 20, 0.10); transform: translateX(2px); }
+  100% { background: transparent;             transform: translateX(0); }
+}
+
+/* --- Process card hover (paired with globe arc highlight) --- */
+.process-card.process-hovered {
+  border-color: var(--neon-soft);
+  box-shadow: 0 0 0 1px var(--neon-dim), 0 0 14px rgba(57, 255, 20, 0.12);
+  background: linear-gradient(180deg, rgba(57, 255, 20, 0.04), transparent);
+}
+
+/* Narrow viewports: let talkers panel collapse below legend */
+@media (max-width: 900px) {
+  .globe-talkers { width: 160px; font-size: 10px; }
+  .talker-row { grid-template-columns: 16px 1fr auto 10px; }
 }
