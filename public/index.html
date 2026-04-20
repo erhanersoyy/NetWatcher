@@ -10,7 +10,15 @@
 <body>
   <header>
     <div class="header-left">
-      <h1>NetWatcher</h1>
+      <span class="logo" aria-hidden="true">
+        <svg viewBox="0 0 32 32" width="22" height="22" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="16" cy="16" r="13" fill="none" stroke="currentColor" stroke-width="1" opacity="0.25" class="logo-ring logo-ring-3"/>
+          <circle cx="16" cy="16" r="9"  fill="none" stroke="currentColor" stroke-width="1" opacity="0.5"  class="logo-ring logo-ring-2"/>
+          <circle cx="16" cy="16" r="5"  fill="none" stroke="currentColor" stroke-width="1.2" opacity="0.85" class="logo-ring logo-ring-1"/>
+          <circle cx="16" cy="16" r="2.2" fill="currentColor"/>
+        </svg>
+      </span>
+      <h1 data-text="NetWatcher" class="neon-title"><span class="title-inner">NetWatcher</span></h1>
       <span class="status-dot" id="statusDot"></span>
       <span class="status-text" id="statusText">Connecting...</span>
     </div>
@@ -55,9 +63,6 @@
             <input type="checkbox" id="filterPrivate"> Exclude Private IPs
           </label>
           <label class="filter-toggle">
-            <input type="checkbox" id="filterLocalhost"> Exclude Localhost
-          </label>
-          <label class="filter-toggle">
             <input type="checkbox" id="filterSystem"> Hide System Processes
           </label>
         </div>
@@ -66,10 +71,10 @@
           <label class="sort-label">Refresh:
             <select class="sort-select" id="refreshSelect">
               <option value="2000">Live (2s)</option>
-              <option value="5000">5s</option>
               <option value="10000">10s</option>
               <option value="30000">30s</option>
               <option value="60000">1m</option>
+              <option value="300000">5m</option>
               <option value="600000">10m</option>
             </select>
           </label>
@@ -91,7 +96,17 @@
       </div>
     </div>
     <div class="right-panel">
-      <div class="globe-container" id="globeContainer"></div>
+      <div class="globe-container" id="globeContainer">
+        <button class="globe-fullscreen-btn" id="globeFullscreenBtn" title="Toggle fullscreen (Esc to exit)" aria-label="Toggle fullscreen">
+          <svg class="icon-expand" viewBox="0 0 16 16" width="16" height="16" xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="1.6">
+            <path d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4"/>
+          </svg>
+          <svg class="icon-collapse" viewBox="0 0 16 16" width="16" height="16" xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="1.6">
+            <path d="M6 2v4H2M10 2v4h4M6 14v-4H2M10 14v-4h4"/>
+          </svg>
+          <span class="fs-label">FS</span>
+        </button>
+      </div>
     </div>
   </div>
 

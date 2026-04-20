@@ -9,7 +9,6 @@ const globeContainer = document.getElementById('globeContainer');
 // Filter refs
 const filterIPv6 = document.getElementById('filterIPv6');
 const filterPrivate = document.getElementById('filterPrivate');
-const filterLocalhost = document.getElementById('filterLocalhost');
 const filterSystem = document.getElementById('filterSystem');
 const searchInput = document.getElementById('searchInput');
 const sortSelect = document.getElementById('sortSelect');
@@ -18,6 +17,7 @@ const collapseAllBtn = document.getElementById('collapseAllBtn');
 const refreshNowBtn = document.getElementById('refreshNowBtn');
 const refreshSelect = document.getElementById('refreshSelect');
 const blockedListBtn = document.getElementById('blockedListBtn');
+const globeFullscreenBtn = document.getElementById('globeFullscreenBtn');
 
 // State
 const expandedPids = new Set();
@@ -27,6 +27,15 @@ let myGlobe = null;
 let blockedIPs = new Set();
 let refreshTimer = null;
 let refreshIntervalMs = 2000;
+// Cached fingerprint of the last globe payload — skip the geometry rebuild
+// (which freezes mouse drag/zoom mid-animation) when nothing has changed.
+let lastGlobeFingerprint = '';
+// When the user is actively dragging/zooming the globe, defer updates. Any
+// pointsData/arcsData call while interacting interrupts the gesture and the
+// globe appears to "stick". We queue the latest payload and apply it once
+// the pointer releases.
+let globeInteracting = false;
+let pendingGlobePayload = null;
 
 const OPACITY = 0.3;
 
@@ -44,6 +53,16 @@ function escapeHtml(str) {
 }
 
 function isIPv6(addr) { return addr.includes(':'); }
+
+function formatBytes(n) {
+  if (n === undefined || n === null || isNaN(n)) return '-';
+  if (n < 1024) return `${n} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let v = n / 1024;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
+}
 
 function isPrivateIP(addr) {
   if (addr.startsWith('10.') || addr.startsWith('192.168.') || addr.startsWith('127.')) return true;
@@ -87,7 +106,6 @@ function sortProcesses(processes) {
 function applyFilters(processes) {
   const exIPv6 = filterIPv6.checked;
   const exPriv = filterPrivate.checked;
-  const exLocal = filterLocalhost.checked;
   const hideSystem = filterSystem.checked;
   const search = searchInput.value.toLowerCase().trim();
 
@@ -97,7 +115,6 @@ function applyFilters(processes) {
       const filtered = proc.connections.filter(conn => {
         if (exIPv6 && isIPv6(conn.remoteAddress)) return false;
         if (exPriv && isPrivateIP(conn.remoteAddress)) return false;
-        if (exLocal && isLocalhost(conn.remoteAddress)) return false;
         if (search) {
           const haystack = `${proc.processName} ${conn.remoteAddress} ${conn.domain || ''} ${conn.geo?.country || ''} ${conn.geo?.isp || ''} ${conn.geo?.city || ''}`.toLowerCase();
           if (!haystack.includes(search)) return false;
@@ -165,11 +182,20 @@ function renderProcess(proc) {
         }
       }
 
+      const rxCell = conn.bytesIn !== undefined
+        ? `<span class="bytes-cell bytes-rx" title="${conn.bytesIn} bytes received">${formatBytes(conn.bytesIn)}</span>`
+        : '<span class="geo-unknown">-</span>';
+      const txCell = conn.bytesOut !== undefined
+        ? `<span class="bytes-cell bytes-tx" title="${conn.bytesOut} bytes sent">${formatBytes(conn.bytesOut)}</span>`
+        : '<span class="geo-unknown">-</span>';
+
       return `<tr class="${isBlocked ? 'row-blocked' : ''}">
         <td>${escapeHtml(conn.protocol)}</td>
         <td>${escapeHtml(conn.remoteAddress)} ${blockedTag}</td>
         <td>${conn.remotePort}</td>
         <td>${domain}</td>
+        <td class="bytes-col">${rxCell}</td>
+        <td class="bytes-col">${txCell}</td>
         <td>${geoCountry}</td>
         <td>${geoIsp}</td>
         <td>${vtBtn}</td>
@@ -180,7 +206,7 @@ function renderProcess(proc) {
     connectionsHtml = `<div class="connections-table">
       <table>
         <thead><tr>
-          <th>Proto</th><th>Remote IP</th><th>Port</th><th>Domain</th><th>Location</th><th>ISP</th><th>Rep.</th><th>Firewall</th>
+          <th>Proto</th><th>Remote IP</th><th>Port</th><th>Domain</th><th class="bytes-col">&#8595; RX</th><th class="bytes-col">&#8593; TX</th><th>Location</th><th>ISP</th><th>Rep.</th><th>Firewall</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>
@@ -205,8 +231,16 @@ function render(processes) {
   const filtered = applyFilters(processes);
   const sorted = sortProcesses(filtered);
   const totalConnections = sorted.reduce((sum, p) => sum + p.connections.length, 0);
-  processCountEl.textContent = `${sorted.length} process${sorted.length !== 1 ? 'es' : ''}`;
-  connectionCountEl.textContent = `${totalConnections} connection${totalConnections !== 1 ? 's' : ''}`;
+  const newProcessText = `${sorted.length} process${sorted.length !== 1 ? 'es' : ''}`;
+  const newConnText = `${totalConnections} connection${totalConnections !== 1 ? 's' : ''}`;
+  if (processCountEl.textContent !== newProcessText) {
+    processCountEl.textContent = newProcessText;
+    flickerCounter(processCountEl);
+  }
+  if (connectionCountEl.textContent !== newConnText) {
+    connectionCountEl.textContent = newConnText;
+    flickerCounter(connectionCountEl);
+  }
 
   if (sorted.length === 0) {
     appEl.innerHTML = '<div class="no-connections">No connections match current filters</div>';
@@ -260,6 +294,30 @@ function initGlobe() {
     if (myGlobe) myGlobe.width(globeContainer.clientWidth).height(globeContainer.clientHeight);
   });
   ro.observe(globeContainer);
+
+  // Track pointer interaction on the globe's own canvas so live refreshes
+  // don't interrupt a drag/zoom gesture. Releasing flushes the latest payload.
+  const beginInteract = () => { globeInteracting = true; };
+  const endInteract = () => {
+    globeInteracting = false;
+    if (pendingGlobePayload) {
+      const { points, arcs, fingerprint } = pendingGlobePayload;
+      pendingGlobePayload = null;
+      lastGlobeFingerprint = fingerprint;
+      myGlobe.pointsData(points).arcsData(arcs);
+    }
+  };
+  globeContainer.addEventListener('pointerdown', beginInteract);
+  // Listen on window so releases outside the container still clear the flag.
+  window.addEventListener('pointerup', endInteract);
+  window.addEventListener('pointercancel', endInteract);
+  // Wheel zoom: brief pause while wheel events are arriving.
+  let wheelTimer = null;
+  globeContainer.addEventListener('wheel', () => {
+    beginInteract();
+    clearTimeout(wheelTimer);
+    wheelTimer = setTimeout(endInteract, 250);
+  }, { passive: true });
 }
 
 function updateGlobe(filteredProcesses) {
@@ -303,6 +361,21 @@ function updateGlobe(filteredProcesses) {
     }
   }
 
+  // Fingerprint the payload — if it matches the previous frame, skip the
+  // pointsData/arcsData call. globe.gl rebuilds merged geometry on every
+  // setter call which interrupts user interaction (drag/zoom).
+  const fingerprint = points.map(p => `${p.lat.toFixed(2)},${p.lng.toFixed(2)},${p.color}`).sort().join('|')
+    + '#' + arcs.map(a => `${a.startLat.toFixed(2)},${a.startLng.toFixed(2)}->${a.endLat.toFixed(2)},${a.endLng.toFixed(2)}`).sort().join('|');
+  if (fingerprint === lastGlobeFingerprint) return;
+
+  // Don't rebuild geometry mid-gesture; remember the latest payload and apply
+  // it as soon as the pointer releases.
+  if (globeInteracting) {
+    pendingGlobePayload = { points, arcs, fingerprint };
+    return;
+  }
+
+  lastGlobeFingerprint = fingerprint;
   myGlobe.pointsData(points).arcsData(arcs);
 }
 
@@ -720,7 +793,7 @@ function showToast(message, type) {
 }
 
 // --- Event listeners ---
-[filterIPv6, filterPrivate, filterLocalhost, filterSystem].forEach(el => {
+[filterIPv6, filterPrivate, filterSystem].forEach(el => {
   el.addEventListener('change', () => { if (lastData) render(lastData); });
 });
 
@@ -771,6 +844,38 @@ refreshNowBtn.addEventListener('click', async () => {
 });
 
 blockedListBtn.addEventListener('click', () => showBlockedListModal());
+
+function setGlobeFullscreen(on) {
+  const isOn = globeContainer.classList.contains('fullscreen');
+  const next = on === undefined ? !isOn : !!on;
+  globeContainer.classList.toggle('fullscreen', next);
+  document.body.classList.toggle('globe-fullscreen-active', next);
+  // Force a re-measure after layout settles so globe.gl's canvas matches.
+  // Two rAFs: first for the class flip to apply, second for the reflow.
+  if (myGlobe) {
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      myGlobe.width(globeContainer.clientWidth).height(globeContainer.clientHeight);
+    }));
+  }
+}
+
+globeFullscreenBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  setGlobeFullscreen();
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && globeContainer.classList.contains('fullscreen')) {
+    setGlobeFullscreen(false);
+  }
+});
+
+// Brief flicker on counter changes for the cyberpunk vibe.
+function flickerCounter(el) {
+  el.classList.remove('counter-flicker');
+  void el.offsetWidth; // restart animation
+  el.classList.add('counter-flicker');
+}
 
 // --- Init ---
 initGlobe();

@@ -1,3 +1,14 @@
+/* --- Theme tokens --- */
+:root {
+  --neon: #39ff14;
+  --neon-soft: rgba(57, 255, 20, 0.55);
+  --neon-dim: rgba(57, 255, 20, 0.18);
+  --magenta: #ff2bd6;
+  --bg: #0d1117;
+  --bg-raised: #161b22;
+  --border: #30363d;
+}
+
 * {
   margin: 0;
   padding: 0;
@@ -6,10 +17,26 @@
 
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
-  background: #0d1117;
+  background: var(--bg);
   color: #c9d1d9;
   min-height: 100vh;
   overflow-x: hidden;
+  position: relative;
+}
+
+/* Subtle CRT scanlines across the whole viewport. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(255, 255, 255, 0.025) 0 1px,
+    transparent 1px 3px
+  );
+  mix-blend-mode: overlay;
+  z-index: 9999;
 }
 
 header {
@@ -17,11 +44,12 @@ header {
   justify-content: space-between;
   align-items: center;
   padding: 12px 24px;
-  background: #161b22;
-  border-bottom: 1px solid #30363d;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--border);
   position: sticky;
   top: 0;
   z-index: 10;
+  box-shadow: 0 1px 0 var(--neon-dim), 0 0 18px rgba(57, 255, 20, 0.04);
 }
 
 .header-left {
@@ -30,11 +58,121 @@ header {
   gap: 12px;
 }
 
+/* --- Logo (radar pulse) --- */
+.logo {
+  color: var(--neon);
+  display: inline-flex;
+  align-items: center;
+  filter: drop-shadow(0 0 4px var(--neon-soft));
+}
+.logo svg { display: block; }
+.logo .logo-ring {
+  transform-origin: 16px 16px;
+  animation: logoPulse 2.6s ease-in-out infinite;
+}
+.logo .logo-ring-2 { animation-delay: 0.4s; }
+.logo .logo-ring-3 { animation-delay: 0.8s; }
+@keyframes logoPulse {
+  0%, 100% { opacity: var(--start-opacity, 0.85); transform: scale(1); }
+  50%      { opacity: 0.15; transform: scale(1.12); }
+}
+
 h1 {
   font-size: 18px;
   font-weight: 600;
   color: #f0f6fc;
+  font-family: 'SF Mono', 'JetBrains Mono', 'Fira Code', monospace;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  position: relative;
+  cursor: default;
+  /* mask the reveal sweep so text appears as the glow passes through */
+  overflow: hidden;
+  padding: 0 2px;
 }
+
+/* The visible text — slides in from the right then sits with a breathing neon glow */
+h1 .title-inner {
+  display: inline-block;
+  color: #f0f6fc;
+  text-shadow:
+    0 0 4px var(--neon-soft),
+    0 0 12px rgba(57, 255, 20, 0.35),
+    0 0 22px rgba(57, 255, 20, 0.15);
+  animation:
+    titleSlideIn 1.1s cubic-bezier(0.2, 0.8, 0.2, 1) both,
+    titleNeonPulse 3.4s ease-in-out 1.1s infinite;
+}
+
+@keyframes titleSlideIn {
+  0%   { transform: translateX(140%); opacity: 0; letter-spacing: 6px; filter: blur(3px); }
+  55%  { opacity: 1; filter: blur(0); }
+  100% { transform: translateX(0);    opacity: 1; letter-spacing: 1.5px; filter: blur(0); }
+}
+@keyframes titleNeonPulse {
+  0%, 100% {
+    text-shadow:
+      0 0 4px var(--neon-soft),
+      0 0 12px rgba(57, 255, 20, 0.35),
+      0 0 22px rgba(57, 255, 20, 0.15);
+  }
+  50% {
+    text-shadow:
+      0 0 6px var(--neon),
+      0 0 16px rgba(57, 255, 20, 0.55),
+      0 0 30px rgba(57, 255, 20, 0.28);
+  }
+}
+
+/* Chromatic glitch layers — render same text with RGB-style offsets on hover. */
+h1::before, h1::after {
+  content: attr(data-text);
+  position: absolute;
+  top: 0; left: 2px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.12s;
+  letter-spacing: 1.5px;
+}
+h1::before { color: var(--neon); transform: translate(-1px, 0); }
+h1::after  { color: var(--magenta); transform: translate(1px, 0); }
+h1:hover::before, h1:hover::after { opacity: 0.85; animation: glitchShift 0.3s steps(2) 2; }
+@keyframes glitchShift {
+  0%   { clip-path: inset(0 0 80% 0); }
+  25%  { clip-path: inset(40% 0 30% 0); }
+  50%  { clip-path: inset(70% 0 5% 0); }
+  75%  { clip-path: inset(20% 0 60% 0); }
+  100% { clip-path: inset(0 0 80% 0); }
+}
+
+/* Neon sweep bar — a bright vertical highlight that races left-to-right across the title. */
+h1.neon-title::before {
+  /* keep the chromatic glitch but add the sweep underneath via a separate overlay */
+}
+h1 .title-inner::after {
+  content: "";
+  position: absolute;
+  top: 0; left: 0;
+  width: 100%; height: 100%;
+  background: linear-gradient(
+    110deg,
+    transparent 0%,
+    transparent 35%,
+    rgba(57, 255, 20, 0.35) 50%,
+    rgba(255, 43, 214, 0.25) 55%,
+    transparent 70%
+  );
+  transform: translateX(-130%);
+  pointer-events: none;
+  animation: titleSweep 6s ease-in-out 1.4s infinite;
+  mix-blend-mode: screen;
+}
+@keyframes titleSweep {
+  0%   { transform: translateX(-130%); }
+  20%  { transform: translateX(130%); }
+  100% { transform: translateX(130%); }
+}
+h1 .title-inner { position: relative; }
 
 .header-right {
   font-size: 13px;
@@ -54,16 +192,29 @@ h1 {
 }
 
 .status-dot.connected {
-  background: #3fb950;
-  box-shadow: 0 0 6px rgba(63, 185, 80, 0.5);
-  animation: pulse 2s infinite;
+  background: var(--neon);
+  box-shadow: 0 0 8px var(--neon-soft), 0 0 14px var(--neon-dim);
+  animation: pulse 1.6s ease-in-out infinite;
 }
 
-.status-dot.error { background: #f85149; }
+.status-dot.error {
+  background: #f85149;
+  box-shadow: 0 0 8px rgba(248, 81, 73, 0.55);
+}
 
 @keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.6; }
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.55; transform: scale(1.25); }
+}
+
+/* Counter flicker — fired by JS when the number changes. */
+.counter-flicker {
+  animation: counterFlicker 0.35s steps(3);
+}
+@keyframes counterFlicker {
+  0%   { color: var(--neon); text-shadow: 0 0 6px var(--neon-soft); }
+  50%  { color: #f0f6fc; text-shadow: none; }
+  100% { color: #8b949e; text-shadow: none; }
 }
 
 .status-text {
@@ -71,14 +222,33 @@ h1 {
   color: #8b949e;
 }
 
-/* Host info bar */
+/* Host info bar — terminal HUD frame */
 .host-info-bar {
   display: flex;
   gap: 24px;
   padding: 10px 24px;
-  background: #0d1117;
-  border-bottom: 1px solid #30363d;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
   flex-wrap: wrap;
+  position: relative;
+}
+.host-info-bar::before,
+.host-info-bar::after {
+  content: "";
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  border-color: var(--neon-soft);
+  border-style: solid;
+  pointer-events: none;
+}
+.host-info-bar::before {
+  top: 4px; left: 8px;
+  border-width: 1px 0 0 1px;
+}
+.host-info-bar::after {
+  bottom: 4px; right: 8px;
+  border-width: 0 1px 1px 0;
 }
 
 .host-info-item {
@@ -125,6 +295,68 @@ h1 {
   flex: 1;
   position: relative;
   overflow: hidden;
+}
+
+.globe-container.fullscreen {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: 9000;
+  background: var(--bg);
+  border: none;
+}
+
+/* When the globe goes fullscreen, hide the page chrome so nothing peeks through. */
+body.globe-fullscreen-active header,
+body.globe-fullscreen-active .host-info-bar,
+body.globe-fullscreen-active .left-panel {
+  display: none !important;
+}
+body.globe-fullscreen-active .content-layout { height: 100vh; }
+body.globe-fullscreen-active .right-panel { width: 100vw; min-width: 0; border: none; }
+
+.globe-fullscreen-btn {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 9999;
+  background: rgba(13, 17, 23, 0.78);
+  color: var(--neon);
+  border: 1px solid var(--neon-soft);
+  border-radius: 6px;
+  padding: 6px 10px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  box-shadow: 0 0 0 1px rgba(57, 255, 20, 0.05), 0 0 12px rgba(57, 255, 20, 0.12);
+  transition: all 0.15s;
+}
+.globe-fullscreen-btn:hover {
+  background: rgba(57, 255, 20, 0.14);
+  border-color: var(--neon);
+  box-shadow: 0 0 14px rgba(57, 255, 20, 0.35);
+  color: #f0f6fc;
+}
+.globe-fullscreen-btn .fs-label { line-height: 1; }
+.globe-fullscreen-btn .icon-collapse { display: none; }
+.globe-container.fullscreen .globe-fullscreen-btn .icon-expand { display: none; }
+.globe-container.fullscreen .globe-fullscreen-btn .icon-collapse { display: inline-block; }
+.globe-container.fullscreen .globe-fullscreen-btn::after {
+  content: "ESC";
+  margin-left: 4px;
+  padding: 1px 5px;
+  font-size: 9px;
+  color: #8b949e;
+  border: 1px solid var(--border);
+  border-radius: 3px;
 }
 
 /* Filters */
@@ -409,6 +641,26 @@ h1 {
 
 .connections-table tr:last-child td { border-bottom: none; }
 .connections-table tr:hover td { background: #1c2128; }
+
+.connections-table th.bytes-col,
+.connections-table td.bytes-col {
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.bytes-cell {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-weight: 500;
+}
+.bytes-cell.bytes-rx {
+  color: var(--neon, #39ff14);
+  text-shadow: 0 0 6px rgba(57, 255, 20, 0.3);
+}
+.bytes-cell.bytes-tx {
+  color: var(--magenta, #ff2bd6);
+  text-shadow: 0 0 6px rgba(255, 43, 214, 0.3);
+}
 
 .flag { margin-right: 6px; }
 
