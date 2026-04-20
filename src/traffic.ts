@@ -49,7 +49,7 @@ function parseEndpoint(side: string, isIPv6: boolean): { ip: string; port: numbe
   return { ip, port };
 }
 
-function parseConnectionLine(line: string): {
+export function parseConnectionLine(line: string): {
   key: string;
   bytesIn: number;
   bytesOut: number;
