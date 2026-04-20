@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="style.css">
   <script src="https://unpkg.com/globe.gl@2.35.1/dist/globe.gl.min.js"></script>
 </head>
-<body>
+<body class="globe-pinned">
   <header>
     <div class="header-left">
       <span class="logo" aria-hidden="true">
@@ -30,6 +30,16 @@
   </header>
 
   <div class="host-info-bar" id="hostInfoBar">
+    <button class="list-toggle-btn" id="listToggleBtn" title="Show process details" aria-label="Toggle process details panel">
+      <svg class="icon-show-list" viewBox="0 0 16 16" width="14" height="14" xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="2" y="2.5" width="12" height="11" rx="1.5"/>
+        <path d="M6 2.5v11"/>
+        <path d="M8.5 6h3M8.5 8.5h3M8.5 11h2"/>
+      </svg>
+      <svg class="icon-hide-list" viewBox="0 0 16 16" width="14" height="14" xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M10 3L4 8l6 5"/>
+      </svg>
+    </button>
     <div class="host-info-item">
       <span class="host-label">Hostname</span>
       <span class="host-value" id="hostHostname">--</span>
@@ -57,13 +67,13 @@
       <div class="filters-bar">
         <div class="filter-group">
           <label class="filter-toggle">
-            <input type="checkbox" id="filterIPv6"> Exclude IPv6
+            <input type="checkbox" id="filterIPv6" checked> Exclude IPv6
           </label>
           <label class="filter-toggle">
-            <input type="checkbox" id="filterPrivate"> Exclude Private IPs
+            <input type="checkbox" id="filterPrivate" checked> Exclude Private IPs
           </label>
           <label class="filter-toggle">
-            <input type="checkbox" id="filterSystem"> Hide System Processes
+            <input type="checkbox" id="filterSystem" checked> Hide System Processes
           </label>
         </div>
         <div class="filter-group">
@@ -74,7 +84,7 @@
               <option value="10000">10s</option>
               <option value="30000">30s</option>
               <option value="60000">1m</option>
-              <option value="300000">5m</option>
+              <option value="300000" selected>5m</option>
               <option value="600000">10m</option>
             </select>
           </label>
@@ -84,7 +94,7 @@
           <label class="sort-label">Sort:
             <select class="sort-select" id="sortSelect">
               <option value="connections">Connections</option>
-              <option value="pid">PID</option>
+              <option value="pid" selected>PID</option>
               <option value="name">Name</option>
             </select>
           </label>
@@ -96,17 +106,7 @@
       </div>
     </div>
     <div class="right-panel">
-      <div class="globe-container" id="globeContainer">
-        <button class="globe-fullscreen-btn" id="globeFullscreenBtn" title="Toggle fullscreen (Esc to exit)" aria-label="Toggle fullscreen">
-          <svg class="icon-expand" viewBox="0 0 16 16" width="16" height="16" xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="1.6">
-            <path d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4"/>
-          </svg>
-          <svg class="icon-collapse" viewBox="0 0 16 16" width="16" height="16" xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="1.6">
-            <path d="M6 2v4H2M10 2v4h4M6 14v-4H2M10 14v-4h4"/>
-          </svg>
-          <span class="fs-label">FS</span>
-        </button>
-      </div>
+      <div class="globe-container" id="globeContainer"></div>
     </div>
   </div>
 

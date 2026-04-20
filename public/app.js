@@ -17,7 +17,7 @@ const collapseAllBtn = document.getElementById('collapseAllBtn');
 const refreshNowBtn = document.getElementById('refreshNowBtn');
 const refreshSelect = document.getElementById('refreshSelect');
 const blockedListBtn = document.getElementById('blockedListBtn');
-const globeFullscreenBtn = document.getElementById('globeFullscreenBtn');
+const listToggleBtn = document.getElementById('listToggleBtn');
 
 // State
 const expandedPids = new Set();
@@ -26,7 +26,9 @@ let hostInfo = null;
 let myGlobe = null;
 let blockedIPs = new Set();
 let refreshTimer = null;
-let refreshIntervalMs = 2000;
+// Default 5m — the select is initialised with matching `selected` attr on
+// the same option, so DOM + state stay aligned.
+let refreshIntervalMs = 300000;
 // Cached fingerprint of the last globe payload — skip the geometry rebuild
 // (which freezes mouse drag/zoom mid-animation) when nothing has changed.
 let lastGlobeFingerprint = '';
@@ -36,8 +38,37 @@ let lastGlobeFingerprint = '';
 // the pointer releases.
 let globeInteracting = false;
 let pendingGlobePayload = null;
+// Last rendered (post-filter, post-sort) process list. The animation loop
+// reuses this to trigger a geometry reconcile when a pin ages out of its
+// lifecycle without a new poll having arrived.
+let lastFilteredProcesses = [];
 
-const OPACITY = 0.3;
+// --- New globe feature state ---
+// Track pin/arc lifecycles across refreshes for flash/dissolve animations.
+// Keys are stable identifiers (pinKey for pins, arcKey for arcs). Values
+// carry birth time and current lifecycle phase ('new' | 'live' | 'dying').
+const pinLifecycle = new Map();  // pinKey -> { birth, phase, deathStarted? }
+const arcLifecycle = new Map();  // arcKey -> { birth, phase, deathStarted? }
+// Rolling bandwidth per destination pin for the Top Talkers panel. We store
+// the most recent sum(bytesIn + bytesOut) seen on any connection to that pin.
+const pinBandwidth = new Map();  // pinKey -> { lat, lng, country, bytes, lastBump }
+// Per-connection cumulative byte snapshot from the previous frame. Used to
+// detect *real* activity on a pin: we sum positive deltas across connections
+// instead of comparing pin-level totals (which can stay flat or even decrease
+// when one connection closes while another opens to the same pin).
+const prevConnBytes = new Map(); // connId -> bytes
+// PID currently hovered on the left panel — arcs/pins belonging to other
+// processes dim to "ghost" mode while this is set.
+let hoveredPid = null;
+// Remote IP focused via globe pin click (auto-fills search). Null = unfocused.
+let focusedPinLabel = null;
+
+const BASE_OPACITY = 0.3;
+const DIM_OPACITY = 0.08;        // everything not owned by the hovered process
+const HIGHLIGHT_OPACITY = 0.95;  // owned arcs during hover
+const FLASH_DURATION_MS = 900;
+const DYING_DURATION_MS = 550;
+const ANIM_FPS = 30;
 
 // --- Helpers ---
 
@@ -248,7 +279,9 @@ function render(processes) {
     appEl.innerHTML = sorted.map(renderProcess).join('');
   }
 
+  lastFilteredProcesses = sorted;
   updateGlobe(sorted);
+  renderTopTalkers();
 }
 
 // --- Globe: matching highlight-links example pattern ---
@@ -260,35 +293,81 @@ function initGlobe() {
     .backgroundImageUrl('//cdn.jsdelivr.net/npm/three-globe/example/img/night-sky.png')
     .width(globeContainer.clientWidth)
     .height(globeContainer.clientHeight)
-    .atmosphereColor('#58a6ff')
+    // Neon cyan — the rAF loop keeps this hue locked and pulses altitude only.
+    .atmosphereColor('#57d8ff')
     .atmosphereAltitude(0.15)
+    // Country borders (GeoJSON loaded async below). Caps/sides kept transparent
+    // so only the edges show — the earth texture stays visible underneath.
+    .polygonsData([])
+    .polygonCapColor(() => 'rgba(0, 0, 0, 0)')
+    .polygonSideColor(() => 'rgba(0, 0, 0, 0)')
+    .polygonStrokeColor(() => 'rgba(87, 216, 255, 0.55)')
+    .polygonAltitude(0.006)
     .pointColor('color')
     .pointAltitude(0)
     .pointRadius('radius')
-    .pointsMerge(true)
+    .pointsMerge(false) // needed so individual pins can flash/dissolve independently
+    .pointLabel(d => d.label ? `<div class="globe-tooltip">${d.label}</div>` : '')
+    .onPointClick(pt => {
+      if (!pt || !pt.pinLabel) return;
+      // Toggle off if clicking the same pin again.
+      if (focusedPinLabel === pt.pinLabel) {
+        focusedPinLabel = null;
+        searchInput.value = '';
+      } else {
+        focusedPinLabel = pt.pinLabel;
+        searchInput.value = pt.pinLabel;
+      }
+      if (lastData) render(lastData);
+    })
     .arcLabel(d => `<div class="globe-tooltip">${d.label}</div>`)
     .arcStartLat('startLat')
     .arcStartLng('startLng')
     .arcEndLat('endLat')
     .arcEndLng('endLng')
-    .arcColor(d => [`rgba(88, 166, 255, ${OPACITY})`, `rgba(249, 115, 22, ${OPACITY})`])
+    .arcColor(arcColorFn)
+    .arcStroke(d => d.stroke ?? 0.4)
     .arcDashLength(0.4)
     .arcDashGap(0.2)
     .arcDashAnimateTime(1500)
-    .onArcHover(hoverArc => myGlobe
-      .arcColor(d => {
-        const op = !hoverArc ? OPACITY : d === hoverArc ? 0.9 : OPACITY / 4;
-        return [`rgba(88, 166, 255, ${op})`, `rgba(249, 115, 22, ${op})`];
-      })
-    );
+    .onArcHover(hoverArc => {
+      myGlobe.arcColor(d => arcColorFn(d, hoverArc));
+    });
 
+  // Render a translucent legend overlay in the bottom-left.
   const legend = document.createElement('div');
   legend.className = 'globe-legend';
   legend.innerHTML = `
     <div class="globe-legend-item"><span class="legend-dot home"></span> Your location</div>
     <div class="globe-legend-item"><span class="legend-dot dest"></span> Remote destination</div>
+    <div class="globe-legend-item"><span class="legend-dot new"></span> New connection</div>
+    <div class="globe-legend-item"><span class="legend-dot dying"></span> Closing</div>
   `;
   globeContainer.appendChild(legend);
+
+  // Top Talkers overlay — populated by renderTopTalkers().
+  const talkers = document.createElement('div');
+  talkers.className = 'globe-talkers';
+  talkers.id = 'globeTalkers';
+  talkers.innerHTML = `
+    <div class="talkers-header">TOP TALKERS</div>
+    <div class="talkers-list" id="talkersList">
+      <div class="talkers-empty">–– no traffic ––</div>
+    </div>
+  `;
+  globeContainer.appendChild(talkers);
+
+  // Clear focused pin when clicking empty space on the globe.
+  globeContainer.addEventListener('click', (e) => {
+    // Only treat as "empty space" clicks that don't bubble from the HTML overlays.
+    if (e.target === globeContainer || e.target.tagName === 'CANVAS') {
+      if (focusedPinLabel) {
+        focusedPinLabel = null;
+        searchInput.value = '';
+        if (lastData) render(lastData);
+      }
+    }
+  });
 
   const ro = new ResizeObserver(() => {
     if (myGlobe) myGlobe.width(globeContainer.clientWidth).height(globeContainer.clientHeight);
@@ -318,6 +397,104 @@ function initGlobe() {
     clearTimeout(wheelTimer);
     wheelTimer = setTimeout(endInteract, 250);
   }, { passive: true });
+
+  // Fetch country borders (non-blocking — the globe renders fine without them).
+  // Using jsdelivr's GitHub mirror of the three-globe example dataset.
+  loadCountryBorders();
+
+  // Drive the atmosphere pulse + lifecycle animations at ~30fps.
+  startGlobeAnimationLoop();
+}
+
+async function loadCountryBorders() {
+  const sources = [
+    'https://cdn.jsdelivr.net/gh/vasturiano/three-globe@master/example/country-polygons/ne_110m_admin_0_countries.geojson',
+    'https://raw.githubusercontent.com/vasturiano/three-globe/master/example/country-polygons/ne_110m_admin_0_countries.geojson',
+  ];
+  for (const url of sources) {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) continue;
+      const data = await res.json();
+      const features = Array.isArray(data?.features) ? data.features : [];
+      if (features.length && myGlobe) myGlobe.polygonsData(features);
+      return;
+    } catch { /* try next source */ }
+  }
+}
+
+// Compute arc color respecting hover state, hovered process dim, and lifecycle.
+function arcColorFn(d, hoverArc) {
+  const lifecycle = arcLifecycle.get(d.arcKey);
+  let op = BASE_OPACITY;
+
+  // Lifecycle: brighten new arcs, fade dying arcs.
+  if (lifecycle) {
+    const now = performance.now();
+    if (lifecycle.phase === 'new') {
+      const age = now - lifecycle.birth;
+      const t = Math.max(0, 1 - age / FLASH_DURATION_MS);
+      op = BASE_OPACITY + (HIGHLIGHT_OPACITY - BASE_OPACITY) * t;
+    } else if (lifecycle.phase === 'dying') {
+      const age = now - lifecycle.deathStarted;
+      const t = Math.max(0, 1 - age / DYING_DURATION_MS);
+      op = BASE_OPACITY * t;
+    }
+  }
+
+  // Process-hover dim: non-owned arcs get pushed way down.
+  if (hoveredPid != null && d.pid !== hoveredPid) {
+    op = Math.min(op, DIM_OPACITY);
+  } else if (hoveredPid != null && d.pid === hoveredPid) {
+    op = Math.max(op, 0.7);
+  }
+
+  // onArcHover emphasis wins over everything else for the hovered arc.
+  if (hoverArc) {
+    op = d === hoverArc ? 0.95 : Math.min(op, DIM_OPACITY);
+  }
+
+  return [`rgba(88, 166, 255, ${op})`, `rgba(249, 115, 22, ${op})`];
+}
+
+// Compute per-point color, with lifecycle flash and dissolve glitch applied.
+function pointColorFn(d) {
+  const now = performance.now();
+  const lifecycle = pinLifecycle.get(d.pinKey);
+
+  // Home pin is always cyan.
+  if (d.kind === 'home') return '#58a6ff';
+
+  // New-pin flash: fade from near-white → neon green → orange base color.
+  if (lifecycle?.phase === 'new') {
+    const age = now - lifecycle.birth;
+    const t = Math.min(1, age / FLASH_DURATION_MS);
+    // 0.0 → 0.35: white-hot (#ffffff)
+    // 0.35 → 0.7: neon green (#39ff14)
+    // 0.7 → 1.0: settle to orange (#f97316)
+    if (t < 0.35) return '#ffffff';
+    if (t < 0.7)  return '#39ff14';
+    return '#f97316';
+  }
+
+  // Closing-pin glitch: chromatic flicker between magenta and red, then fade to transparent.
+  if (lifecycle?.phase === 'dying') {
+    const age = now - lifecycle.deathStarted;
+    const t = Math.min(1, age / DYING_DURATION_MS);
+    // Fast flip between two colors for a glitch feel.
+    const blink = Math.floor(t * 8) % 2 === 0;
+    return blink ? '#ff2bd6' : '#f85149';
+  }
+
+  // Process hover dim.
+  if (hoveredPid != null) {
+    // If any connection for this pin belongs to the hovered process, keep bright.
+    // (Pins can be shared by multiple processes; d.pids is populated in updateGlobe.)
+    if (d.pids && d.pids.has(hoveredPid)) return '#f97316';
+    return '#30363d';
+  }
+
+  return '#f97316';
 }
 
 function updateGlobe(filteredProcesses) {
@@ -325,15 +502,31 @@ function updateGlobe(filteredProcesses) {
 
   const points = [];
   const arcs = [];
-  const seenPins = new Set();
+  const seenPins = new Map();   // pinKey -> pin object (so we can merge pids)
   const seenArcs = new Set();
+  const currentPinKeys = new Set();
+  const currentArcKeys = new Set();
+  const now = performance.now();
 
   let homeLat = 0, homeLon = 0;
   if (hostInfo?.geo) {
     homeLat = hostInfo.geo.lat;
     homeLon = hostInfo.geo.lon;
-    points.push({ lat: homeLat, lng: homeLon, radius: 0.6, color: '#58a6ff' });
+    points.push({
+      kind: 'home',
+      pinKey: '__home__',
+      lat: homeLat,
+      lng: homeLon,
+      radius: 0.6,
+      color: '#58a6ff',
+    });
+    currentPinKeys.add('__home__');
   }
+
+  // Reset per-frame bandwidth accumulator for the top-talkers panel.
+  const frameBandwidth = new Map(); // pinKey -> bytes this frame
+  const framePositiveDelta = new Map(); // pinKey -> summed positive per-conn delta this frame
+  const frameConnBytes = new Map(); // connId -> bytes (snapshot to swap into prevConnBytes at end)
 
   for (const proc of filteredProcesses) {
     for (const conn of proc.connections) {
@@ -341,42 +534,326 @@ function updateGlobe(filteredProcesses) {
       if (!geo || geo.country === 'Local' || (!geo.lat && !geo.lon)) continue;
 
       const pinKey = `${geo.lat.toFixed(2)},${geo.lon.toFixed(2)}`;
-      if (!seenPins.has(pinKey)) {
-        seenPins.add(pinKey);
-        points.push({ lat: geo.lat, lng: geo.lon, radius: 0.35, color: '#f97316' });
-      }
+      const pinLabel = escapeHtml(geo.city || geo.country || conn.remoteAddress);
 
-      if (homeLat || homeLon) {
-        const arcKey = `${homeLat},${homeLon}->${pinKey}`;
+      if (!seenPins.has(pinKey)) {
+        const countryRaw = [geo.city, geo.country].filter(Boolean).join(', ');
+        const pin = {
+          kind: 'dest',
+          pinKey,
+          pinLabel,
+          lat: geo.lat,
+          lng: geo.lon,
+          radius: 0.35,
+          color: '#f97316',
+          pids: new Set([proc.pid]),
+          label: `${geo.city ? escapeHtml(geo.city) + ', ' : ''}${escapeHtml(geo.country || '')}`,
+          countryRaw,
+        };
+        seenPins.set(pinKey, pin);
+        points.push(pin);
+      } else {
+        seenPins.get(pinKey).pids.add(proc.pid);
+      }
+      currentPinKeys.add(pinKey);
+
+      // Accumulate bytes for top-talkers (use latest per-connection totals).
+      const bytes = (conn.bytesIn || 0) + (conn.bytesOut || 0);
+      frameBandwidth.set(pinKey, (frameBandwidth.get(pinKey) || 0) + bytes);
+
+      // Per-connection delta detection for the spark/bump: a pin "bumps" when
+      // at least one of its connections moved bytes since the previous frame.
+      const connId = `${proc.pid}|${conn.localAddress || ''}|${conn.localPort || ''}|${conn.remoteAddress || ''}|${conn.remotePort || ''}`;
+      const prev = prevConnBytes.get(connId);
+      // Treat a previously-unseen connection carrying bytes as positive activity.
+      // If bytes < prev (counter reset / connection reuse) we don't subtract.
+      const delta = prev === undefined ? bytes : Math.max(0, bytes - prev);
+      if (delta > 0) {
+        framePositiveDelta.set(pinKey, (framePositiveDelta.get(pinKey) || 0) + delta);
+      }
+      frameConnBytes.set(connId, bytes);
+
+      if (hostInfo?.geo) {
+        const arcKey = `${proc.pid}:${homeLat},${homeLon}->${pinKey}`;
         if (!seenArcs.has(arcKey)) {
           seenArcs.add(arcKey);
           const domainStr = conn.domain && conn.domain !== '-' ? ` (${escapeHtml(conn.domain)})` : '';
           arcs.push({
+            arcKey,
+            pid: proc.pid,
             startLat: homeLat, startLng: homeLon,
             endLat: geo.lat, endLng: geo.lon,
             label: `${escapeHtml(proc.processName)} &#8594; ${escapeHtml(conn.remoteAddress)}${domainStr}<br>${geo.city ? escapeHtml(geo.city) + ', ' : ''}${escapeHtml(geo.country)}`,
           });
+          currentArcKeys.add(arcKey);
+        } else {
+          currentArcKeys.add(arcKey);
         }
       }
     }
   }
 
-  // Fingerprint the payload — if it matches the previous frame, skip the
-  // pointsData/arcsData call. globe.gl rebuilds merged geometry on every
-  // setter call which interrupts user interaction (drag/zoom).
-  const fingerprint = points.map(p => `${p.lat.toFixed(2)},${p.lng.toFixed(2)},${p.color}`).sort().join('|')
-    + '#' + arcs.map(a => `${a.startLat.toFixed(2)},${a.startLng.toFixed(2)}->${a.endLat.toFixed(2)},${a.endLng.toFixed(2)}`).sort().join('|');
+  // --- Update bandwidth store for Top Talkers ---
+  // Store raw (un-escaped) country; `renderTopTalkers` escapes at the sink.
+  for (const [pinKey, bytes] of frameBandwidth) {
+    const existing = pinBandwidth.get(pinKey);
+    const pin = seenPins.get(pinKey);
+    if (!pin) continue;
+    const bumped = (framePositiveDelta.get(pinKey) || 0) > 0;
+    pinBandwidth.set(pinKey, {
+      lat: pin.lat,
+      lng: pin.lng,
+      country: pin.countryRaw,
+      bytes,
+      lastBump: bumped ? now : (existing?.lastBump || 0),
+    });
+  }
+  // NOTE: pinBandwidth is pruned in the lifecycle cleanup below (in lockstep
+  // with `pinLifecycle.delete`) so dying pins can still rehydrate from it.
+
+  // Swap per-connection byte snapshot for next-frame delta computation.
+  prevConnBytes.clear();
+  for (const [connId, bytes] of frameConnBytes) prevConnBytes.set(connId, bytes);
+
+  // --- Lifecycle bookkeeping: mark new pins/arcs, and start dying for gone ones. ---
+  for (const pinKey of currentPinKeys) {
+    if (!pinLifecycle.has(pinKey) && pinKey !== '__home__') {
+      pinLifecycle.set(pinKey, { birth: now, phase: 'new', lastSeen: now });
+    } else if (pinLifecycle.has(pinKey)) {
+      const lc = pinLifecycle.get(pinKey);
+      // Revive a pin that was dying before we finished removing it.
+      if (lc.phase === 'dying') {
+        pinLifecycle.set(pinKey, { birth: now, phase: 'new', lastSeen: now });
+      } else {
+        lc.lastSeen = now;
+      }
+    }
+  }
+  // Pins that were in lifecycle but not seen this frame: transition to dying.
+  // The animation loop also does this decoupled from the poll cadence (so a
+  // 10-minute refresh setting still animates closures shortly after they
+  // actually happen).
+  for (const pinKey of pinLifecycle.keys()) {
+    if (!currentPinKeys.has(pinKey)) {
+      const lc = pinLifecycle.get(pinKey);
+      if (lc.phase !== 'dying') {
+        pinLifecycle.set(pinKey, { ...lc, phase: 'dying', deathStarted: now });
+      }
+    }
+  }
+  for (const arcKey of currentArcKeys) {
+    if (!arcLifecycle.has(arcKey)) {
+      arcLifecycle.set(arcKey, { birth: now, phase: 'new' });
+    } else {
+      const lc = arcLifecycle.get(arcKey);
+      if (lc.phase === 'dying') {
+        arcLifecycle.set(arcKey, { birth: now, phase: 'new' });
+      }
+    }
+  }
+  for (const arcKey of arcLifecycle.keys()) {
+    if (!currentArcKeys.has(arcKey)) {
+      const lc = arcLifecycle.get(arcKey);
+      if (lc.phase !== 'dying') {
+        arcLifecycle.set(arcKey, { ...lc, phase: 'dying', deathStarted: now });
+      }
+    }
+  }
+
+  // --- Include dying pins/arcs in the render payload until their animation completes. ---
+  // Pins that are dying but no longer in currentPinKeys still need to appear
+  // so the glitch-fade can play. Bandwidth cache is pruned *after* this loop
+  // (in the cleanup block below) so `last` is guaranteed non-null here.
+  for (const [pinKey, lc] of pinLifecycle) {
+    if (lc.phase === 'dying' && !currentPinKeys.has(pinKey)) {
+      const last = pinBandwidth.get(pinKey);
+      if (last) {
+        const labelRaw = last.country || '—';
+        points.push({
+          kind: 'dest',
+          pinKey,
+          pinLabel: escapeHtml(labelRaw),
+          lat: last.lat,
+          lng: last.lng,
+          radius: 0.35,
+          color: '#ff2bd6',
+          pids: new Set(),
+          label: `${escapeHtml(labelRaw)} (closing)`,
+          countryRaw: labelRaw,
+        });
+      }
+    }
+  }
+  for (const [arcKey, lc] of arcLifecycle) {
+    if (lc.phase === 'dying' && !currentArcKeys.has(arcKey)) {
+      // Dying arcs already sent to the scene remain; we just keep them alive
+      // in arcsData by not re-adding them. globe.gl drops them on next setter.
+      // To keep them visible during DYING_DURATION_MS we would need to
+      // retain their geometry; since we can't reconstruct lat/lng here cheaply,
+      // we accept a single-frame dropout for arcs and rely on the pin glitch
+      // to carry the closing visual.
+    }
+  }
+
+  // --- Clean up lifecycles once animations complete. ---
+  for (const [pinKey, lc] of pinLifecycle) {
+    if (lc.phase === 'new' && now - lc.birth > FLASH_DURATION_MS) {
+      pinLifecycle.set(pinKey, { ...lc, phase: 'live' });
+    }
+    if (lc.phase === 'dying' && now - lc.deathStarted > DYING_DURATION_MS) {
+      pinLifecycle.delete(pinKey);
+      pinBandwidth.delete(pinKey); // keep bandwidth cache in lockstep
+    }
+  }
+  for (const [arcKey, lc] of arcLifecycle) {
+    if (lc.phase === 'new' && now - lc.birth > FLASH_DURATION_MS) {
+      arcLifecycle.set(arcKey, { ...lc, phase: 'live' });
+    }
+    if (lc.phase === 'dying' && now - lc.deathStarted > DYING_DURATION_MS) {
+      arcLifecycle.delete(arcKey);
+    }
+  }
+
+  // Fingerprint — include presence of dying items so their removal triggers a redraw.
+  const fingerprint = points.map(p => `${p.lat.toFixed(2)},${p.lng.toFixed(2)},${p.color},${p.kind}`).sort().join('|')
+    + '#' + arcs.map(a => `${a.arcKey}`).sort().join('|')
+    + '#L:' + [...pinLifecycle].map(([k, v]) => `${k}:${v.phase}`).sort().join(',');
   if (fingerprint === lastGlobeFingerprint) return;
 
-  // Don't rebuild geometry mid-gesture; remember the latest payload and apply
-  // it as soon as the pointer releases.
   if (globeInteracting) {
     pendingGlobePayload = { points, arcs, fingerprint };
     return;
   }
 
+  // Scene actually changed — now it's safe to re-bind the color fn and
+  // swap geometry. Doing these unconditionally on every poll tick caused
+  // globe.gl (with pointsMerge(false)) to stutter mid-drag.
+  myGlobe.pointColor(pointColorFn);
   lastGlobeFingerprint = fingerprint;
   myGlobe.pointsData(points).arcsData(arcs);
+}
+
+// --- Animation loop: atmosphere pulse + per-frame color recomputes for lifecycles ---
+
+// A pin that hasn't been seen in this many ms gets flipped to 'dying' by the
+// animation loop — even if the next poll is still minutes away.
+const PIN_STALE_MS = 3000;
+
+function hasActiveLifecycle() {
+  // No allocations — early-exit iteration.
+  for (const lc of pinLifecycle.values()) {
+    if (lc.phase === 'new' || lc.phase === 'dying') return true;
+  }
+  for (const lc of arcLifecycle.values()) {
+    if (lc.phase === 'new' || lc.phase === 'dying') return true;
+  }
+  return false;
+}
+
+function startGlobeAnimationLoop() {
+  let last = 0;
+  let rafId = 0;
+  const interval = 1000 / ANIM_FPS;
+
+  function loop(t) {
+    rafId = requestAnimationFrame(loop);
+    if (t - last < interval) return;
+    last = t;
+    if (!myGlobe) return;
+    // CRITICAL: do nothing while the user is dragging/zooming. Any globe.gl
+    // setter call mid-gesture interrupts the orbit controller and the globe
+    // appears to "stick" on every refresh.
+    if (globeInteracting) return;
+
+    // --- Staleness-driven lifecycle transition (decoupled from poll cadence) ---
+    let transitioned = false;
+    const now = performance.now();
+    for (const [pinKey, lc] of pinLifecycle) {
+      if (lc.phase !== 'dying' && lc.lastSeen !== undefined &&
+          now - lc.lastSeen > PIN_STALE_MS) {
+        pinLifecycle.set(pinKey, { ...lc, phase: 'dying', deathStarted: now });
+        transitioned = true;
+      }
+      if (lc.phase === 'dying' && lc.deathStarted !== undefined &&
+          now - lc.deathStarted > DYING_DURATION_MS) {
+        pinLifecycle.delete(pinKey);
+        pinBandwidth.delete(pinKey);
+        transitioned = true;
+      }
+      if (lc.phase === 'new' && now - lc.birth > FLASH_DURATION_MS) {
+        pinLifecycle.set(pinKey, { ...lc, phase: 'live' });
+      }
+    }
+    if (transitioned) {
+      updateGlobe(lastFilteredProcesses);
+      renderTopTalkers();
+    }
+
+    // --- Atmosphere: stable light-blue neon. Altitude pulses with traffic;
+    //     hue stays locked to cyan (no more shifting to green). ---
+    let totalBytes = 0;
+    for (const v of pinBandwidth.values()) totalBytes += v.bytes;
+    const traffic = Math.min(1, Math.log10(1 + totalBytes) / 8);
+    const basePulse = 0.5 + 0.5 * Math.sin(t / (1400 - 400 * traffic));
+    const altitude = 0.14 + 0.04 * basePulse + 0.03 * traffic;
+    // hsl(195, 90%, 65%) ≈ #57d8ff — neon cyan.
+    const lightness = 62 + 4 * basePulse + 4 * traffic;
+    myGlobe.atmosphereAltitude(altitude)
+      .atmosphereColor(`hsl(195, 95%, ${lightness.toFixed(1)}%)`);
+
+    // --- Recompute colors so lifecycle flashes/dissolves animate smoothly ---
+    if (hasActiveLifecycle()) {
+      myGlobe.pointColor(pointColorFn);
+      myGlobe.arcColor(d => arcColorFn(d));
+    }
+  }
+
+  function start() {
+    if (rafId) return;
+    last = 0;
+    rafId = requestAnimationFrame(loop);
+  }
+  function stop() {
+    if (rafId) cancelAnimationFrame(rafId);
+    rafId = 0;
+  }
+
+  // Pause the loop entirely when the tab is backgrounded. Browsers throttle
+  // rAF anyway, but this also stops the 2s setInterval-ish setter churn on
+  // re-focus (setters still run via updateGlobe on poll ticks, not here).
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) stop(); else start();
+  });
+
+  start();
+}
+
+// --- Top Talkers panel ---
+
+function renderTopTalkers() {
+  const listEl = document.getElementById('talkersList');
+  if (!listEl) return;
+
+  const entries = [...pinBandwidth.entries()]
+    .map(([pinKey, v]) => ({ pinKey, ...v }))
+    .sort((a, b) => b.bytes - a.bytes)
+    .slice(0, 3);
+
+  if (entries.length === 0) {
+    listEl.innerHTML = '<div class="talkers-empty">–– no traffic ––</div>';
+    return;
+  }
+
+  const now = performance.now();
+  listEl.innerHTML = entries.map((e, i) => {
+    const recentBump = now - e.lastBump < 1200;
+    return `<div class="talker-row ${recentBump ? 'talker-bump' : ''}">
+      <span class="talker-rank">${i + 1}</span>
+      <span class="talker-loc">${escapeHtml(e.country || '—')}</span>
+      <span class="talker-bytes">${escapeHtml(formatBytes(e.bytes))}</span>
+      <span class="talker-spark ${recentBump ? 'active' : ''}"></span>
+    </div>`;
+  }).join('');
 }
 
 // --- Blocked IPs ---
@@ -612,6 +1089,35 @@ appEl.addEventListener('click', (e) => {
   }
 });
 
+// --- Hover a process card → highlight its arcs on the globe ---
+
+appEl.addEventListener('mouseover', (e) => {
+  const card = e.target.closest('.process-card');
+  if (!card) return;
+  const pid = parseInt(card.dataset.pid, 10);
+  if (pid === hoveredPid) return;
+  hoveredPid = pid;
+  card.classList.add('process-hovered');
+  if (myGlobe) {
+    myGlobe.pointColor(pointColorFn);
+    myGlobe.arcColor(d => arcColorFn(d));
+  }
+});
+
+appEl.addEventListener('mouseout', (e) => {
+  const card = e.target.closest('.process-card');
+  if (!card) return;
+  // Only clear if we're leaving the card entirely (not moving to a child).
+  const related = e.relatedTarget;
+  if (related && card.contains(related)) return;
+  hoveredPid = null;
+  card.classList.remove('process-hovered');
+  if (myGlobe) {
+    myGlobe.pointColor(pointColorFn);
+    myGlobe.arcColor(d => arcColorFn(d));
+  }
+});
+
 function showConfirmDialog(message, onConfirm) {
   const existing = document.getElementById('confirmOverlay');
   if (existing) existing.remove();
@@ -707,7 +1213,6 @@ function buildBlockedRows(history) {
     for (const ev of events) {
       if (ev.action === 'block') {
         if (pending) {
-          // Two blocks in a row without an unblock — treat first as lost/closed.
           rows.push({ ip, country: pending.country ?? null, blockedAt: pending.at, status: 'unblocked', unblockedAt: pending.at });
         }
         pending = ev;
@@ -762,7 +1267,6 @@ function askSudoPassword(action, ip, onSubmit) {
 
   const cleanup = (submitted) => {
     let pwd = submitted ? input.value : '';
-    // Overwrite then clear the input value before removing it from the DOM.
     input.value = '';
     overlay.remove();
     return pwd;
@@ -804,14 +1308,18 @@ collapseAllBtn.addEventListener('click', () => collapseAll());
 let searchTimeout;
 searchInput.addEventListener('input', () => {
   clearTimeout(searchTimeout);
-  searchTimeout = setTimeout(() => { if (lastData) render(lastData); }, 200);
+  searchTimeout = setTimeout(() => {
+    // Manual search edits clear the pin focus state so the two stay consistent.
+    if (focusedPinLabel && !searchInput.value.includes(focusedPinLabel)) {
+      focusedPinLabel = null;
+    }
+    if (lastData) render(lastData);
+  }, 200);
 });
 
 // --- Refresh orchestration ---
 
 async function refreshAll({ fresh } = { fresh: false }) {
-  // Run independent fetches in parallel. Host info bypasses its server-side cache
-  // only when the user explicitly asked for a fresh pull.
   await Promise.all([
     fetchConnections(),
     fetchHostInfo({ fresh }),
@@ -845,35 +1353,41 @@ refreshNowBtn.addEventListener('click', async () => {
 
 blockedListBtn.addEventListener('click', () => showBlockedListModal());
 
-function setGlobeFullscreen(on) {
-  const isOn = globeContainer.classList.contains('fullscreen');
-  const next = on === undefined ? !isOn : !!on;
-  globeContainer.classList.toggle('fullscreen', next);
-  document.body.classList.toggle('globe-fullscreen-active', next);
-  // Force a re-measure after layout settles so globe.gl's canvas matches.
-  // Two rAFs: first for the class flip to apply, second for the reflow.
-  if (myGlobe) {
-    requestAnimationFrame(() => requestAnimationFrame(() => {
-      myGlobe.width(globeContainer.clientWidth).height(globeContainer.clientHeight);
-    }));
-  }
+// List toggle: the process-detail panel is collapsed by default (body has
+// `globe-pinned` class). Pressing the toggle slides the panel in from the
+// left; pressing again collapses it back. The globe canvas is re-sized after
+// the CSS transition settles so it fills whatever width it was just given.
+function setListVisible(show) {
+  const currentlyHidden = document.body.classList.contains('globe-pinned');
+  const nextHidden = show === undefined ? !currentlyHidden : !show;
+  document.body.classList.toggle('globe-pinned', nextHidden);
+  if (!myGlobe) return;
+  const resize = () => {
+    if (!myGlobe) return;
+    myGlobe.width(globeContainer.clientWidth).height(globeContainer.clientHeight);
+  };
+  // Match to the .left-panel CSS transition (260ms): fire once early to
+  // catch the transition start and again at the end for the final width.
+  requestAnimationFrame(resize);
+  setTimeout(resize, 140);
+  setTimeout(resize, 300);
 }
 
-globeFullscreenBtn.addEventListener('click', (e) => {
+listToggleBtn.addEventListener('click', (e) => {
   e.stopPropagation();
-  setGlobeFullscreen();
+  setListVisible();
 });
 
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && globeContainer.classList.contains('fullscreen')) {
-    setGlobeFullscreen(false);
+  // Esc collapses the list panel back (only if currently open).
+  if (e.key === 'Escape' && !document.body.classList.contains('globe-pinned')) {
+    setListVisible(false);
   }
 });
 
-// Brief flicker on counter changes for the cyberpunk vibe.
 function flickerCounter(el) {
   el.classList.remove('counter-flicker');
-  void el.offsetWidth; // restart animation
+  void el.offsetWidth;
   el.classList.add('counter-flicker');
 }
 

@@ -21,9 +21,10 @@ Everything runs on `127.0.0.1:3847` with `Host`.
 
 ## Features
 
-- **Live connection list** — `lsof` snapshot, grouped by PID, configurable refresh (Live 2s / 5s / 10s / 30s / 1m / 10m + manual).
+- **Live connection list** — `lsof` snapshot, grouped by PID, configurable refresh (Live 2s / 10s / 30s / 1m / 5m / 10m + manual; defaults to 5m, sorted by PID). Default filters exclude IPv6, private IPs, and system processes.
+- **Per-connection RX / TX bytes** — byte counts from `nettop`, merged into each connection row.
 - **Geo + reverse DNS** — batched against ip-api.com, cached in memory.
-- **3D globe** — home + remote endpoints as pins, arcs between them.
+- **3D globe** — neon-themed, with country borders, pulse-animated pins keyed to live traffic, and arcs that dim siblings on hover. A top-talkers panel surfaces the busiest countries. The globe is full-width by default; a toggle in the host-info bar slides the process-detail panel in from the left.
 - **Kill process** — uid-verified `SIGTERM`.
 - **Block / unblock IP** — `pfctl` anchor + table; per-request sudo password (never stored).
 - **Blocked IPs history** — persisted to `data/blocks.json` (gitignored), modal shows IP / country / blocked-at / status.
