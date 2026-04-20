@@ -66,6 +66,39 @@ export function recordUnblock(ip: string): Promise<void> {
   });
 }
 
+// Drop one session's worth of events for an IP — the `block` event at
+// `blockedAt` and, when the session actually ended in an unblock, the
+// paired `unblock` event at `unblockedAt`. Leaves any other sessions
+// (historical or future) for the same IP untouched.
+//
+// Refuses when the `block` being removed is the currently active one —
+// removing it would leave the live pfctl rule without a matching record.
+// Superseded rows pass `unblockedAt = null` because their "end time" is
+// a different block's timestamp, not a real unblock event to delete.
+export function deleteBlockHistoryRow(
+  ip: string,
+  blockedAt: number,
+  unblockedAt: number | null,
+): Promise<{ success: boolean; removed: number; message?: string }> {
+  return serialize(async () => {
+    const store = await readStore();
+    const active = store.active[ip];
+    if (active && active.blockedAt === blockedAt) {
+      return { success: false, removed: 0, message: 'Block is still active — unblock it first.' };
+    }
+    const before = store.history.length;
+    store.history = store.history.filter((e) => {
+      if (e.ip !== ip) return true;
+      if (e.action === 'block' && e.at === blockedAt) return false;
+      if (unblockedAt !== null && e.action === 'unblock' && e.at === unblockedAt) return false;
+      return true;
+    });
+    const removed = before - store.history.length;
+    if (removed > 0) await writeStore(store);
+    return { success: true, removed };
+  });
+}
+
 export async function getBlockHistory(): Promise<BlockHistoryResponse> {
   const store = await readStore();
   return {
