@@ -4,111 +4,253 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>NetWatcher</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
-  <script src="https://unpkg.com/globe.gl@2.35.1/dist/globe.gl.min.js"></script>
 </head>
-<body class="globe-pinned">
-  <header>
-    <div class="header-left">
-      <span class="logo" aria-hidden="true">
-        <svg viewBox="0 0 32 32" width="22" height="22" xmlns="http://www.w3.org/2000/svg">
-          <circle cx="16" cy="16" r="13" fill="none" stroke="currentColor" stroke-width="1" opacity="0.25" class="logo-ring logo-ring-3"/>
-          <circle cx="16" cy="16" r="9"  fill="none" stroke="currentColor" stroke-width="1" opacity="0.5"  class="logo-ring logo-ring-2"/>
-          <circle cx="16" cy="16" r="5"  fill="none" stroke="currentColor" stroke-width="1.2" opacity="0.85" class="logo-ring logo-ring-1"/>
-          <circle cx="16" cy="16" r="2.2" fill="currentColor"/>
+<body class="density-compact">
+
+  <!-- ============ MASTHEAD ============ -->
+  <header class="mast">
+    <div class="brand">
+      <div class="glyph">
+        <svg viewBox="0 0 34 34" aria-hidden="true">
+          <circle class="n1" cx="17" cy="17" r="13.5"/>
+          <circle class="n2" cx="17" cy="17" r="7"/>
+          <path class="n1" d="M3.5 17 H30.5 M17 3.5 V30.5"/>
+          <circle class="n3" cx="17" cy="17" r="2.2"/>
+          <circle class="n4" cx="30.5" cy="17" r="1.6"/>
+          <circle class="n4" cx="17" cy="3.5" r="1.6"/>
+          <circle class="n3" cx="3.5" cy="17" r="1.6"/>
         </svg>
-      </span>
-      <h1 data-text="NetWatcher" class="neon-title"><span class="title-inner">NetWatcher</span></h1>
-      <span class="status-dot" id="statusDot"></span>
-      <span class="status-text" id="statusText">Connecting...</span>
+      </div>
+      <div>
+        <div class="name">NetWatcher</div>
+        <div class="tag">macOS network monitoring tool</div>
+      </div>
     </div>
-    <div class="header-right">
-      <span id="processCount">0 processes</span>
-      <span class="separator">|</span>
-      <span id="connectionCount">0 connections</span>
+
+    <div class="ops">
+      <div class="ops-cell">
+        <div class="l">Host</div>
+        <div class="v" id="hostHostname">—</div>
+      </div>
+      <div class="ops-cell">
+        <div class="l">Local</div>
+        <div class="v" id="hostLocalIP">—</div>
+      </div>
+      <div class="ops-cell">
+        <div class="l">Public</div>
+        <div class="v hot" id="hostPublicIP">—</div>
+      </div>
+      <div class="ops-cell">
+        <div class="l">Geo</div>
+        <div class="v" id="hostLocation">—</div>
+      </div>
+      <div class="ops-cell">
+        <div class="l">ISP</div>
+        <div class="v" id="hostISP">—</div>
+      </div>
+    </div>
+
+    <div class="clock">
+      <div class="t" id="clockT">—</div>
+      <div class="d" id="clockD">—</div>
+      <div class="state" id="statusText">connecting…</div>
     </div>
   </header>
 
-  <div class="host-info-bar" id="hostInfoBar">
-    <button class="list-toggle-btn" id="listToggleBtn" title="Show process details" aria-label="Toggle process details panel">
-      <svg class="icon-show-list" viewBox="0 0 16 16" width="14" height="14" xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-        <rect x="2" y="2.5" width="12" height="11" rx="1.5"/>
-        <path d="M6 2.5v11"/>
-        <path d="M8.5 6h3M8.5 8.5h3M8.5 11h2"/>
-      </svg>
-      <svg class="icon-hide-list" viewBox="0 0 16 16" width="14" height="14" xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M10 3L4 8l6 5"/>
-      </svg>
-    </button>
-    <div class="host-info-item">
-      <span class="host-label">Hostname</span>
-      <span class="host-value" id="hostHostname">--</span>
-    </div>
-    <div class="host-info-item">
-      <span class="host-label">Local IP</span>
-      <span class="host-value" id="hostLocalIP">--</span>
-    </div>
-    <div class="host-info-item">
-      <span class="host-label">Public IP</span>
-      <span class="host-value" id="hostPublicIP">--</span>
-    </div>
-    <div class="host-info-item">
-      <span class="host-label">Location</span>
-      <span class="host-value" id="hostLocation">--</span>
-    </div>
-    <div class="host-info-item">
-      <span class="host-label">ISP</span>
-      <span class="host-value" id="hostISP">--</span>
-    </div>
+  <!-- ============ MAIN ============ -->
+  <div class="main">
+
+    <!-- LEFT: process queue -->
+    <aside class="queue">
+      <button class="q-toggle" id="qToggle" title="Collapse process list" aria-label="Collapse">
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path id="qToggleIcon" d="M10 4 L5 8 L10 12"/>
+        </svg>
+      </button>
+      <div class="q-collapsed-rail">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+          <rect x="2" y="3" width="12" height="2"/><rect x="2" y="7" width="12" height="2"/><rect x="2" y="11" width="12" height="2"/>
+        </svg>
+        <div class="stack">PROCESS LIST</div>
+      </div>
+
+      <div class="queue-head">
+        <div class="title">
+          <h2>Process list</h2>
+          <span class="n mono" id="procCount">0 visible</span>
+        </div>
+
+        <div class="queue-netinfo" id="queueNetInfo">
+          <div class="qni-cell">
+            <span class="qni-l">ISP</span>
+            <span class="qni-v" id="queueISP">—</span>
+          </div>
+          <div class="qni-cell">
+            <span class="qni-l">Geo</span>
+            <span class="qni-v" id="queueGeo">—</span>
+          </div>
+        </div>
+
+        <div class="sortbar">
+          <span class="sl">Sort by</span>
+          <select id="sortSelect">
+            <option value="connections" selected>Connections</option>
+            <option value="pid">PID</option>
+            <option value="name">Name</option>
+          </select>
+          <button class="toolbar-btn mini" id="refreshNowBtn" title="Refresh now">↻</button>
+          <select id="refreshSelect" class="refresh-select" title="Refresh interval">
+            <option value="2000">2s</option>
+            <option value="10000">10s</option>
+            <option value="30000">30s</option>
+            <option value="60000">1m</option>
+            <option value="300000" selected>5m</option>
+            <option value="600000">10m</option>
+          </select>
+        </div>
+
+        <div class="searchbar">
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+            <circle cx="7" cy="7" r="5"></circle><path d="M11 11l3.2 3.2"></path>
+          </svg>
+          <input id="searchInput" placeholder="process, ip, domain" autocomplete="off">
+          <span class="kbd">/</span>
+        </div>
+
+        <div class="chips" id="chips">
+          <button class="chip on" data-f="sys">hide system</button>
+          <button class="chip on" data-f="v6">no ipv6</button>
+          <button class="chip on" data-f="priv">no private</button>
+          <button class="chip chip-icon" id="expandToggleChip" data-f="expandToggle" title="Expand all" aria-label="Expand all">
+            <svg class="ic-expand" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 6 L8 10 L12 6"/>
+            </svg>
+            <svg class="ic-collapse" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 10 L8 6 L12 10"/>
+            </svg>
+            <span class="lbl">expand all</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="queue-body" id="queue">
+        <div class="queue-empty">Loading connections…</div>
+      </div>
+    </aside>
+
+    <!-- CENTER: stage -->
+    <section class="stage">
+      <span class="reg tl"></span><span class="reg tr"></span>
+      <span class="reg bl"></span><span class="reg br"></span>
+
+      <div class="radar-wrap">
+        <canvas id="radar"></canvas>
+        <div class="bearings" id="bearings"></div>
+
+        <div class="readouts left">
+          <div class="readout" id="talkersReadout">
+            <div class="lbl"><span>Top talkers</span><span>cum.</span></div>
+            <div id="talkersList">
+              <div class="line"><span class="k">— no traffic —</span><span class="v"></span></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="readouts right">
+          <div class="readout" id="healthReadout">
+            <div class="lbl"><span>System health</span><span>sim</span></div>
+            <div class="line"><span class="k">CPU</span><span class="v" id="hCPU">—</span></div>
+            <div class="hbar"><span id="hCPUbar" style="background:var(--ice)"></span></div>
+            <div class="line"><span class="k">Memory</span><span class="v" id="hMem">—</span></div>
+            <div class="hbar"><span id="hMembar" style="background:var(--purple)"></span></div>
+            <div class="line"><span class="k">Temp</span><span class="v hot" id="hTemp">—</span></div>
+            <div class="hbar"><span id="hTempbar" style="background:var(--signal)"></span></div>
+            <div class="line"><span class="k">Load avg</span><span class="v" id="hLoad">—</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="throughput">
+        <div class="tp rx">
+          <div class="k">Download</div>
+          <div class="v tnum"><span id="tRx">0.00</span><span class="u">MB/s</span></div>
+          <svg class="graph" viewBox="0 0 100 48" preserveAspectRatio="none" id="gRx"></svg>
+        </div>
+        <div class="tp tx">
+          <div class="k">Upload</div>
+          <div class="v tnum"><span id="tTx">0.00</span><span class="u">MB/s</span></div>
+          <svg class="graph" viewBox="0 0 100 48" preserveAspectRatio="none" id="gTx"></svg>
+        </div>
+      </div>
+
+      <div class="stats-strip">
+        <div class="dial">
+          <span class="k">Processes</span>
+          <span class="v hot tnum" id="dProc">0</span>
+          <span class="sub"><span id="dProcSys">0</span> system · <span id="dProcUsr">0</span> user</span>
+        </div>
+        <div class="dial">
+          <span class="k">Connections</span>
+          <span class="v ice tnum" id="dConn">0</span>
+          <span class="sub" id="dConnSub">—</span>
+        </div>
+        <div class="dial">
+          <span class="k">Countries</span>
+          <span class="v tnum" id="dCtry">0</span>
+          <span class="sub" id="dCtrySub">across 0 ASN ranges</span>
+        </div>
+      </div>
+
+      <aside class="blocked-panel">
+        <div class="blocked-head">
+          <h3>Blocked IPs <span class="cnt" id="blockedCntBig">0</span></h3>
+          <div class="actions">
+            <input id="blockedSearch" placeholder="filter ip, host, reason" />
+            <button id="blockedExport">Export</button>
+            <button id="blockedHistory" title="Open full history with bulk actions">History…</button>
+            <button class="primary" id="blockedAdd">+ Add IP</button>
+          </div>
+        </div>
+        <div class="blocked-body" id="blockedList"></div>
+      </aside>
+    </section>
+
   </div>
 
-  <div class="content-layout">
-    <div class="left-panel">
-      <div class="filters-bar">
-        <div class="filter-group">
-          <label class="filter-toggle">
-            <input type="checkbox" id="filterIPv6" checked> Exclude IPv6
-          </label>
-          <label class="filter-toggle">
-            <input type="checkbox" id="filterPrivate" checked> Exclude Private IPs
-          </label>
-          <label class="filter-toggle">
-            <input type="checkbox" id="filterSystem" checked> Hide System Processes
-          </label>
-        </div>
-        <div class="filter-group">
-          <button class="toolbar-btn" id="refreshNowBtn" title="Fetch connections and host info now">&#8634; Refresh Now</button>
-          <label class="sort-label">Refresh:
-            <select class="sort-select" id="refreshSelect">
-              <option value="2000">Live (2s)</option>
-              <option value="10000">10s</option>
-              <option value="30000">30s</option>
-              <option value="60000">1m</option>
-              <option value="300000" selected>5m</option>
-              <option value="600000">10m</option>
-            </select>
-          </label>
-          <button class="toolbar-btn" id="blockedListBtn" title="View blocked IPs and history">Blocked IPs</button>
-          <button class="toolbar-btn" id="expandAllBtn" title="Expand All">Expand All</button>
-          <button class="toolbar-btn" id="collapseAllBtn" title="Collapse All">Collapse All</button>
-          <label class="sort-label">Sort:
-            <select class="sort-select" id="sortSelect">
-              <option value="connections">Connections</option>
-              <option value="pid" selected>PID</option>
-              <option value="name">Name</option>
-            </select>
-          </label>
-          <input type="text" class="search-input" id="searchInput" placeholder="Search process name or IP...">
-        </div>
-      </div>
-      <div id="app">
-        <div class="loading">Loading connections...</div>
+  <!-- ============ FOOT ============ -->
+  <footer class="foot">
+    <div class="g">
+      <span>refresh · <b id="footRefresh">5m</b></span>
+      <span>sort · <b id="footSort">connections</b></span>
+      <span>tz · <b id="footTz">—</b></span>
+    </div>
+    <div class="g">
+      <span>anchor · <b>com.apple/250.netwatcher</b></span>
+      <span class="good" id="footAnchor">● loaded</span>
+      <span>blocked · <b id="footBlocked">0</b></span>
+      <span>press <b>T</b> · tweaks · <b>/</b> · find</span>
+    </div>
+  </footer>
+
+  <!-- ============ TWEAKS ============ -->
+  <aside class="tweaks" id="tweaks">
+    <h4>Tweaks <span class="kbd-lite">T</span></h4>
+    <div class="r">
+      <div class="l">Density</div>
+      <div class="seg" data-key="density">
+        <button data-v="compact" class="on">Compact</button>
+        <button data-v="comfortable">Comfortable</button>
       </div>
     </div>
-    <div class="right-panel">
-      <div class="globe-container" id="globeContainer"></div>
+    <div class="r toggle on" id="twRadar">
+      <span>Radar sweep</span>
+      <span class="sw"></span>
     </div>
-  </div>
+  </aside>
 
   <script src="app.js"></script>
 </body>

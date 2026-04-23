@@ -1,104 +1,122 @@
-// DOM refs
-const appEl = document.getElementById('app');
-const statusDot = document.getElementById('statusDot');
-const statusText = document.getElementById('statusText');
-const processCountEl = document.getElementById('processCount');
-const connectionCountEl = document.getElementById('connectionCount');
-const globeContainer = document.getElementById('globeContainer');
+/* ============================================================
+   NetWatcher — wiring real API to the Radar Room redesign
+   ============================================================ */
 
-// Filter refs
-const filterIPv6 = document.getElementById('filterIPv6');
-const filterPrivate = document.getElementById('filterPrivate');
-const filterSystem = document.getElementById('filterSystem');
-const searchInput = document.getElementById('searchInput');
+// ---------- DOM ----------
+const queueEl = document.getElementById('queue');
+const qEl = document.getElementById('searchInput');
 const sortSelect = document.getElementById('sortSelect');
-const expandAllBtn = document.getElementById('expandAllBtn');
-const collapseAllBtn = document.getElementById('collapseAllBtn');
-const refreshNowBtn = document.getElementById('refreshNowBtn');
+const chipsEl = document.getElementById('chips');
+const procCountEl = document.getElementById('procCount');
+const blockedCountEl = document.getElementById('blockedCount');
+const statusText = document.getElementById('statusText');
+const qToggleBtn = document.getElementById('qToggle');
+const qToggleIcon = document.getElementById('qToggleIcon');
 const refreshSelect = document.getElementById('refreshSelect');
-const blockedListBtn = document.getElementById('blockedListBtn');
-const listToggleBtn = document.getElementById('listToggleBtn');
+const refreshNowBtn = document.getElementById('refreshNowBtn');
 
-// State
+// stage/health
+const tRx = document.getElementById('tRx');
+const tTx = document.getElementById('tTx');
+const gRx = document.getElementById('gRx');
+const gTx = document.getElementById('gTx');
+const dProc = document.getElementById('dProc');
+const dProcSys = document.getElementById('dProcSys');
+const dProcUsr = document.getElementById('dProcUsr');
+const dConn = document.getElementById('dConn');
+const dConnSub = document.getElementById('dConnSub');
+const dCtry = document.getElementById('dCtry');
+const dCtrySub = document.getElementById('dCtrySub');
+const talkersListEl = document.getElementById('talkersList');
+const hCPU = document.getElementById('hCPU');
+const hCPUbar = document.getElementById('hCPUbar');
+const hMem = document.getElementById('hMem');
+const hMembar = document.getElementById('hMembar');
+const hTemp = document.getElementById('hTemp');
+const hTempbar = document.getElementById('hTempbar');
+const hLoad = document.getElementById('hLoad');
+
+// blocked panel
+const blockedListEl = document.getElementById('blockedList');
+const blockedSearch = document.getElementById('blockedSearch');
+const blockedCntBig = document.getElementById('blockedCntBig');
+const blockedExport = document.getElementById('blockedExport');
+const blockedAdd = document.getElementById('blockedAdd');
+const blockedHistoryBtn = document.getElementById('blockedHistory');
+
+// foot
+const footRefresh = document.getElementById('footRefresh');
+const footSort = document.getElementById('footSort');
+const footTz = document.getElementById('footTz');
+const footBlocked = document.getElementById('footBlocked');
+
+// masthead
+const clockT = document.getElementById('clockT');
+const clockD = document.getElementById('clockD');
+const hostHostname = document.getElementById('hostHostname');
+const hostLocalIP = document.getElementById('hostLocalIP');
+const hostPublicIP = document.getElementById('hostPublicIP');
+const hostLocation = document.getElementById('hostLocation');
+const hostISP = document.getElementById('hostISP');
+const queueISP = document.getElementById('queueISP');
+const queueGeo = document.getElementById('queueGeo');
+
+// ---------- State ----------
 const expandedPids = new Set();
 let lastData = null;
 let hostInfo = null;
-let myGlobe = null;
 let blockedIPs = new Set();
+let blockedMeta = new Map(); // ip -> { country, blockedAt }
 let refreshTimer = null;
-// Default 5m — the select is initialised with matching `selected` attr on
-// the same option, so DOM + state stay aligned.
 let refreshIntervalMs = 300000;
-// Cached fingerprint of the last globe payload — skip the geometry rebuild
-// (which freezes mouse drag/zoom mid-animation) when nothing has changed.
-let lastGlobeFingerprint = '';
-// When the user is actively dragging/zooming the globe, defer updates. Any
-// pointsData/arcsData call while interacting interrupts the gesture and the
-// globe appears to "stick". We queue the latest payload and apply it once
-// the pointer releases.
-let globeInteracting = false;
-let pendingGlobePayload = null;
-// Last rendered (post-filter, post-sort) process list. The animation loop
-// reuses this to trigger a geometry reconcile when a pin ages out of its
-// lifecycle without a new poll having arrived.
-let lastFilteredProcesses = [];
+const liveTraffic = new Map();        // trafficKey -> { bytesIn, bytesOut }
+const prevConnBytes = new Map();      // connId -> bytes
+// Filter toggles — mirror the chip states on load.
+const filter = { sys: true, v6: true, priv: true, q: '' };
+let blockedQ = '';
 
-// --- New globe feature state ---
-// Track pin/arc lifecycles across refreshes for flash/dissolve animations.
-// Keys are stable identifiers (pinKey for pins, arcKey for arcs). Values
-// carry birth time and current lifecycle phase ('new' | 'live' | 'dying').
-const pinLifecycle = new Map();  // pinKey -> { birth, phase, deathStarted? }
-const arcLifecycle = new Map();  // arcKey -> { birth, phase, deathStarted? }
-// Rolling bandwidth per destination pin for the Top Talkers panel. We store
-// the most recent sum(bytesIn + bytesOut) seen on any connection to that pin.
-const pinBandwidth = new Map();  // pinKey -> { lat, lng, country, bytes, lastBump }
-// Per-connection cumulative byte snapshot from the previous frame. Used to
-// detect *real* activity on a pin: we sum positive deltas across connections
-// instead of comparing pin-level totals (which can stay flat or even decrease
-// when one connection closes while another opens to the same pin).
-const prevConnBytes = new Map(); // connId -> bytes
-// PID currently hovered on the left panel — arcs/pins belonging to other
-// processes dim to "ghost" mode while this is set.
-let hoveredPid = null;
-// Remote IP focused via globe pin click (auto-fills search). Null = unfocused.
-let focusedPinLabel = null;
+const CSRF_HEADER = { 'x-requested-by': 'netwatcher' };
 
-const BASE_OPACITY = 0.3;
-const DIM_OPACITY = 0.08;        // everything not owned by the hovered process
-const HIGHLIGHT_OPACITY = 0.95;  // owned arcs during hover
-const FLASH_DURATION_MS = 900;
-const DYING_DURATION_MS = 550;
-const ANIM_FPS = 30;
-
-// --- Helpers ---
-
+// ---------- Helpers ----------
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str ?? '';
+  return div.innerHTML;
+}
+function isIPv6(addr) { return typeof addr === 'string' && addr.includes(':'); }
+function isLocalhost(addr) { return addr === '127.0.0.1' || addr === '::1' || (typeof addr === 'string' && addr.startsWith('127.')); }
+function isPrivateIP(addr) {
+  if (!addr) return false;
+  if (addr.startsWith('10.') || addr.startsWith('192.168.') || addr.startsWith('127.')) return true;
+  if (addr === '0.0.0.0' || addr === '::' || addr === '::1' || addr.startsWith('169.254.') || addr.startsWith('fe80:')) return true;
+  const lower = addr.toLowerCase();
+  if (lower.startsWith('::ffff:')) {
+    const v4 = lower.slice(7);
+    if (v4.includes('.')) return isPrivateIP(v4);
+  }
+  if (addr.startsWith('172.')) {
+    const s = parseInt(addr.split('.')[1], 10);
+    if (s >= 16 && s <= 31) return true;
+  }
+  if (addr.startsWith('100.')) {
+    const s = parseInt(addr.split('.')[1], 10);
+    if (s >= 64 && s <= 127) return true;
+  }
+  if (/^f[cd][0-9a-f]{2}:/i.test(addr)) return true;
+  return false;
+}
 function flag(code) {
   if (!code || code === 'LO' || code === '??') return '';
   return String.fromCodePoint(...[...code.toUpperCase()].map(c => 0x1F1E6 + c.charCodeAt(0) - 65));
 }
-
-function escapeHtml(str) {
-  const div = document.createElement('div');
-  div.textContent = str;
-  return div.innerHTML;
-}
-
-function isIPv6(addr) { return addr.includes(':'); }
-
 function formatBytes(n) {
   if (n === undefined || n === null || isNaN(n)) return '-';
   if (n < 1024) return `${n} B`;
   const units = ['KB', 'MB', 'GB', 'TB'];
-  let v = n / 1024;
-  let i = 0;
+  let v = n / 1024, i = 0;
   while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
   return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
 }
-
-/**
- * Mirror of `trafficKey` in `src/traffic.ts`. Must stay in sync so that
- * keys emitted by the SSE stream resolve to the correct `<tr>` DOM nodes.
- */
 function clientTrafficKey(protocol, localIP, localPort, remoteIP, remotePort) {
   const normalize = (ip) => {
     let out = String(ip).replace(/%.+$/, '');
@@ -110,798 +128,435 @@ function clientTrafficKey(protocol, localIP, localPort, remoteIP, remotePort) {
   return `${proto}|${normalize(localIP)}|${localPort}|${normalize(remoteIP)}|${remotePort}`;
 }
 
-// Live per-connection byte counters, updated by the SSE stream. Read at
-// render time so a re-render (filter toggle, refresh poll) doesn't flash
-// back to stale server values between stream ticks.
-const liveTraffic = new Map();
-
-function isPrivateIP(addr) {
-  if (addr.startsWith('10.') || addr.startsWith('192.168.') || addr.startsWith('127.')) return true;
-  if (addr === '0.0.0.0' || addr === '::' || addr === '::1' || addr.startsWith('169.254.') || addr.startsWith('fe80:')) return true;
-  const lower = addr.toLowerCase();
-  if (lower.startsWith('::ffff:')) {
-    const v4 = lower.slice(7);
-    if (v4.includes('.')) return isPrivateIP(v4);
-  }
-  if (addr.startsWith('172.')) {
-    const second = parseInt(addr.split('.')[1], 10);
-    if (second >= 16 && second <= 31) return true;
-  }
-  if (addr.startsWith('100.')) {
-    const second = parseInt(addr.split('.')[1], 10);
-    if (second >= 64 && second <= 127) return true;
-  }
-  if (/^f[cd][0-9a-f]{2}:/i.test(addr)) return true;
-  return false;
-}
-
-const CSRF_HEADER = { 'x-requested-by': 'netwatcher' };
-
-function isLocalhost(addr) {
-  return addr === '127.0.0.1' || addr === '::1' || addr.startsWith('127.');
-}
-
-// --- Sorting ---
-
+// ---------- Sort / filter ----------
 function sortProcesses(processes) {
   const mode = sortSelect.value;
   return [...processes].sort((a, b) => {
     if (mode === 'pid') return a.pid - b.pid;
     if (mode === 'name') return a.processName.localeCompare(b.processName);
-    return b.connections.length - a.connections.length; // connections (default)
+    return b.connections.length - a.connections.length;
   });
 }
 
-// --- Filtering ---
-
 function applyFilters(processes) {
-  const exIPv6 = filterIPv6.checked;
-  const exPriv = filterPrivate.checked;
-  const hideSystem = filterSystem.checked;
-  const search = searchInput.value.toLowerCase().trim();
-
+  const search = filter.q.toLowerCase().trim();
   return processes
-    .filter(proc => !(hideSystem && proc.isSystemProcess))
+    .filter(proc => !(filter.sys && proc.isSystemProcess))
     .map(proc => {
       const filtered = proc.connections.filter(conn => {
-        if (exIPv6 && isIPv6(conn.remoteAddress)) return false;
-        if (exPriv && isPrivateIP(conn.remoteAddress)) return false;
+        if (filter.v6 && isIPv6(conn.remoteAddress)) return false;
+        if (filter.priv && isPrivateIP(conn.remoteAddress)) return false;
         if (search) {
-          const haystack = `${proc.processName} ${conn.remoteAddress} ${conn.domain || ''} ${conn.geo?.country || ''} ${conn.geo?.isp || ''} ${conn.geo?.city || ''}`.toLowerCase();
-          if (!haystack.includes(search)) return false;
+          const hay = `${proc.processName} ${conn.remoteAddress} ${conn.domain || ''} ${conn.geo?.country || ''} ${conn.geo?.isp || ''} ${conn.geo?.city || ''}`.toLowerCase();
+          if (!hay.includes(search)) return false;
         }
         return true;
       });
       return { ...proc, connections: filtered };
-    }).filter(proc => proc.connections.length > 0);
+    })
+    .filter(proc => proc.connections.length > 0);
 }
 
-// --- Render ---
-
-function renderProcess(proc) {
-  const isExpanded = expandedPids.has(proc.pid);
-
-  const descTooltip = escapeHtml(proc.description || 'Unknown process');
-  const infoBadge = `<span class="info-badge" title="${descTooltip}">?</span>`;
-
-  const cautionBadge = proc.isSystemProcess
-    ? '<span class="caution-badge" title="System process - killing may affect system stability">&#9888;</span>'
-    : '';
-
-  const killBtnClass = proc.isSystemProcess ? 'kill-btn kill-btn-system' : 'kill-btn';
-  const killBtnAttrs = `data-action="kill" data-pid="${proc.pid}" data-name="${escapeHtml(proc.processName)}" data-system="${proc.isSystemProcess ? '1' : '0'}"`;
-
-  let connectionsHtml = '';
-  if (isExpanded) {
-    const rows = proc.connections.map(conn => {
-      const geo = conn.geo;
-      let geoCountry = '<span class="geo-unknown">Resolving...</span>';
-      let geoIsp = '<span class="geo-unknown">-</span>';
-
-      if (geo) {
-        if (geo.country === 'Local') {
-          geoCountry = 'Local';
-          geoIsp = 'Private Network';
-        } else {
-          const f = flag(geo.countryCode);
-          const city = geo.city ? `${escapeHtml(geo.city)}, ` : '';
-          geoCountry = `<span class="flag">${f}</span>${city}${escapeHtml(geo.country)}`;
-          geoIsp = escapeHtml(geo.isp);
-        }
-      }
-
-      const domain = conn.domain && conn.domain !== '-'
-        ? `<span class="domain-name">${escapeHtml(conn.domain)}</span>`
-        : '<span class="geo-unknown">-</span>';
-
-      const ipEsc = escapeHtml(conn.remoteAddress);
-      const showVt = !isPrivateIP(conn.remoteAddress) && !isLocalhost(conn.remoteAddress);
-      const vtBtn = showVt
-        ? `<button class="vt-btn" data-action="vt" data-ip="${ipEsc}" title="VirusTotal reputation check">VT</button>`
-        : '<span class="geo-unknown">-</span>';
-
-      // Blocked status + block/unblock button
-      const isBlocked = blockedIPs.has(conn.remoteAddress);
-      const blockedTag = isBlocked ? '<span class="blocked-tag">BLOCKED</span>' : '';
-      const canBlock = !isPrivateIP(conn.remoteAddress) && !isLocalhost(conn.remoteAddress);
-      let blockBtn = '';
-      if (canBlock) {
-        if (isBlocked) {
-          blockBtn = `<button class="unblock-btn" data-action="unblock" data-ip="${ipEsc}" title="Unblock IP in firewall">Unblock</button>`;
-        } else {
-          blockBtn = `<button class="block-btn" data-action="block" data-ip="${ipEsc}" title="Block IP in firewall">Block</button>`;
-        }
-      }
-
-      const tKey = clientTrafficKey(
-        conn.protocol,
-        conn.localAddress,
-        conn.localPort,
-        conn.remoteAddress,
-        conn.remotePort,
-      );
-      // Prefer the SSE stream's value over whatever the poll response
-      // carried — the stream updates every second; the poll may be 5min old.
-      const live = liveTraffic.get(tKey);
-      const rxBytes = live ? live.bytesIn : conn.bytesIn;
-      const txBytes = live ? live.bytesOut : conn.bytesOut;
-      const rxCell = rxBytes !== undefined
-        ? `<span class="bytes-cell bytes-rx" title="${rxBytes} bytes received">${formatBytes(rxBytes)}</span>`
-        : '<span class="bytes-cell bytes-rx geo-unknown">-</span>';
-      const txCell = txBytes !== undefined
-        ? `<span class="bytes-cell bytes-tx" title="${txBytes} bytes sent">${formatBytes(txBytes)}</span>`
-        : '<span class="bytes-cell bytes-tx geo-unknown">-</span>';
-
-      return `<tr class="${isBlocked ? 'row-blocked' : ''}" data-traffic-key="${escapeHtml(tKey)}">
-        <td>${escapeHtml(conn.protocol)}</td>
-        <td>${escapeHtml(conn.remoteAddress)} ${blockedTag}</td>
-        <td>${conn.remotePort}</td>
-        <td>${domain}</td>
-        <td class="bytes-col">${rxCell}</td>
-        <td class="bytes-col">${txCell}</td>
-        <td>${geoCountry}</td>
-        <td>${geoIsp}</td>
-        <td>${vtBtn}</td>
-        <td>${blockBtn}</td>
-      </tr>`;
-    }).join('');
-
-    connectionsHtml = `<div class="connections-table">
-      <table>
-        <thead><tr>
-          <th>Proto</th><th>Remote IP</th><th>Port</th><th>Domain</th><th class="bytes-col">&#8595; RX</th><th class="bytes-col">&#8593; TX</th><th>Location</th><th>ISP</th><th>Rep.</th><th>Firewall</th>
-        </tr></thead>
-        <tbody>${rows}</tbody>
-      </table>
-    </div>`;
+// ---------- Process aggregation (for the row meta line) ----------
+function procSummary(proc) {
+  const countries = new Map();
+  let totalBytes = 0;
+  for (const c of proc.connections) {
+    const cc = c.geo?.countryCode;
+    if (cc) countries.set(cc, (countries.get(cc) || 0) + 1);
+    const tk = clientTrafficKey(c.protocol, c.localAddress, c.localPort, c.remoteAddress, c.remotePort);
+    const live = liveTraffic.get(tk);
+    totalBytes += (live ? live.bytesIn : (c.bytesIn || 0));
+    totalBytes += (live ? live.bytesOut : (c.bytesOut || 0));
   }
-
-  return `<div class="process-card ${isExpanded ? 'expanded' : ''} ${proc.isSystemProcess ? 'system-process' : ''}" data-pid="${proc.pid}">
-    <div class="process-header" data-action="toggle" data-pid="${proc.pid}">
-      <span class="expand-icon">&#9654;</span>
-      ${cautionBadge}
-      <span class="process-name">${escapeHtml(proc.processName)}</span>
-      ${infoBadge}
-      <span class="process-pid">PID ${proc.pid}</span>
-      <span class="conn-count">${proc.connections.length}</span>
-      <button class="${killBtnClass}" ${killBtnAttrs}>Kill</button>
-    </div>
-    ${connectionsHtml}
-  </div>`;
+  // pick the most-represented country as the row's primary origin
+  let primary = null;
+  let best = 0;
+  for (const [cc, n] of countries) {
+    if (n > best) { best = n; primary = cc; }
+  }
+  return { primaryCC: primary, totalBytes, countryCount: countries.size };
 }
 
-function render(processes) {
-  const filtered = applyFilters(processes);
+// ---------- Render ----------
+function updateExpandToggle() {
+  const btn = document.getElementById('expandToggleChip');
+  if (!btn || !lastData) return;
+  const visible = applyFilters(lastData);
+  const allOpen = visible.length > 0 && visible.every((p) => expandedPids.has(p.pid));
+  btn.classList.toggle('all-expanded', allOpen);
+  const lbl = btn.querySelector('.lbl');
+  if (lbl) lbl.textContent = allOpen ? 'collapse all' : 'expand all';
+  btn.title = allOpen ? 'Collapse all' : 'Expand all';
+}
+
+function renderQueue() {
+  if (!lastData) {
+    queueEl.innerHTML = '<div class="queue-empty">Loading connections…</div>';
+    return;
+  }
+  const filtered = applyFilters(lastData);
   const sorted = sortProcesses(filtered);
-  const totalConnections = sorted.reduce((sum, p) => sum + p.connections.length, 0);
-  const newProcessText = `${sorted.length} process${sorted.length !== 1 ? 'es' : ''}`;
-  const newConnText = `${totalConnections} connection${totalConnections !== 1 ? 's' : ''}`;
-  if (processCountEl.textContent !== newProcessText) {
-    processCountEl.textContent = newProcessText;
-    flickerCounter(processCountEl);
-  }
-  if (connectionCountEl.textContent !== newConnText) {
-    connectionCountEl.textContent = newConnText;
-    flickerCounter(connectionCountEl);
-  }
+
+  procCountEl.textContent = `${sorted.length} visible`;
+  updateExpandToggle();
 
   if (sorted.length === 0) {
-    appEl.innerHTML = '<div class="no-connections">No connections match current filters</div>';
+    queueEl.innerHTML = '<div class="queue-empty">No connections match current filters</div>';
   } else {
-    appEl.innerHTML = sorted.map(renderProcess).join('');
+    queueEl.innerHTML = sorted.map((p, i) => renderProcRow(p, i)).join('');
   }
 
-  lastFilteredProcesses = sorted;
-  updateGlobe(sorted);
-  renderTopTalkers();
+  // update stats strip
+  const totalConns = sorted.reduce((s, p) => s + p.connections.length, 0);
+  const countries = new Set();
+  const asns = new Set();
+  let established = 0, timewait = 0, other = 0;
+  for (const p of sorted) {
+    for (const c of p.connections) {
+      if (c.geo?.countryCode) countries.add(c.geo.countryCode);
+      if (c.geo?.isp) asns.add(c.geo.isp);
+      const st = (c.state || '').toUpperCase();
+      if (st.startsWith('EST')) established++;
+      else if (st.includes('TIME')) timewait++;
+      else other++;
+    }
+  }
+  dProc.textContent = sorted.length;
+  const sysCount = (lastData || []).filter(p => p.isSystemProcess).length;
+  dProcSys.textContent = sysCount;
+  dProcUsr.textContent = (lastData || []).length - sysCount;
+  dConn.textContent = totalConns;
+  dConnSub.textContent = `${established} EST · ${timewait} TIME_WAIT · ${other} other`;
+  dCtry.textContent = countries.size;
+  dCtrySub.textContent = `across ${asns.size} ASN range${asns.size === 1 ? '' : 's'}`;
+
+  renderTopTalkers(sorted);
+  radarUpdateTargets(sorted);
 }
 
-// --- Globe: matching highlight-links example pattern ---
+function renderProcRow(proc, i) {
+  const expanded = expandedPids.has(proc.pid);
+  const summary = procSummary(proc);
+  const idx = String(i + 1).padStart(2, '0');
+  const w = Math.min(1, Math.max(0.08, proc.connections.length / 16)).toFixed(2);
+  const f = summary.primaryCC ? flag(summary.primaryCC) : '';
+  const countryLabel = summary.primaryCC
+    ? `${f} ${summary.primaryCC}${summary.countryCount > 1 ? ` +${summary.countryCount - 1}` : ''}`
+    : '· local';
+  const traffic = summary.totalBytes > 0 ? `↓↑ ${formatBytes(summary.totalBytes)}` : '';
+  const killBtn = `<button class="kill ${proc.isSystemProcess ? 'danger' : ''}" data-action="kill" data-pid="${proc.pid}" data-name="${escapeHtml(proc.processName)}" data-system="${proc.isSystemProcess ? '1' : '0'}" title="Kill PID ${proc.pid}">kill</button>`;
 
-function initGlobe() {
-  myGlobe = new Globe(globeContainer)
-    .globeImageUrl('//cdn.jsdelivr.net/npm/three-globe/example/img/earth-night.jpg')
-    .bumpImageUrl('//cdn.jsdelivr.net/npm/three-globe/example/img/earth-topology.png')
-    .backgroundImageUrl('//cdn.jsdelivr.net/npm/three-globe/example/img/night-sky.png')
-    .width(globeContainer.clientWidth)
-    .height(globeContainer.clientHeight)
-    // Neon cyan — the rAF loop keeps this hue locked and pulses altitude only.
-    .atmosphereColor('#57d8ff')
-    .atmosphereAltitude(0.15)
-    // Country borders (GeoJSON loaded async below). Caps/sides kept transparent
-    // so only the edges show — the earth texture stays visible underneath.
-    .polygonsData([])
-    .polygonCapColor(() => 'rgba(0, 0, 0, 0)')
-    .polygonSideColor(() => 'rgba(0, 0, 0, 0)')
-    .polygonStrokeColor(() => 'rgba(87, 216, 255, 0.55)')
-    .polygonAltitude(0.006)
-    .pointColor('color')
-    .pointAltitude(0)
-    .pointRadius('radius')
-    .pointsMerge(false) // needed so individual pins can flash/dissolve independently
-    .pointLabel(d => d.label ? `<div class="globe-tooltip">${d.label}</div>` : '')
-    .onPointClick(pt => {
-      if (!pt || !pt.pinLabel) return;
-      // Toggle off if clicking the same pin again.
-      if (focusedPinLabel === pt.pinLabel) {
-        focusedPinLabel = null;
-        searchInput.value = '';
-      } else {
-        focusedPinLabel = pt.pinLabel;
-        searchInput.value = pt.pinLabel;
-      }
-      if (lastData) render(lastData);
-    })
-    .arcLabel(d => `<div class="globe-tooltip">${d.label}</div>`)
-    .arcStartLat('startLat')
-    .arcStartLng('startLng')
-    .arcEndLat('endLat')
-    .arcEndLng('endLng')
-    .arcColor(arcColorFn)
-    .arcStroke(d => d.stroke ?? 0.4)
-    .arcDashLength(0.4)
-    .arcDashGap(0.2)
-    .arcDashAnimateTime(1500)
-    .onArcHover(hoverArc => {
-      myGlobe.arcColor(d => arcColorFn(d, hoverArc));
-    });
-
-  // Render a translucent legend overlay in the bottom-left.
-  const legend = document.createElement('div');
-  legend.className = 'globe-legend';
-  legend.innerHTML = `
-    <div class="globe-legend-item"><span class="legend-dot home"></span> Your location</div>
-    <div class="globe-legend-item"><span class="legend-dot dest"></span> Remote destination</div>
-    <div class="globe-legend-item"><span class="legend-dot new"></span> New connection</div>
-    <div class="globe-legend-item"><span class="legend-dot dying"></span> Closing</div>
-  `;
-  globeContainer.appendChild(legend);
-
-  // Top Talkers overlay — populated by renderTopTalkers().
-  const talkers = document.createElement('div');
-  talkers.className = 'globe-talkers';
-  talkers.id = 'globeTalkers';
-  talkers.innerHTML = `
-    <div class="talkers-header">TOP TALKERS</div>
-    <div class="talkers-list" id="talkersList">
-      <div class="talkers-empty">–– no traffic ––</div>
+  const rowHtml = `
+    <div class="row ${proc.isSystemProcess ? 'sys' : ''} ${expanded ? 'active' : ''}" data-action="toggle" data-pid="${proc.pid}">
+      <div class="idx">${idx}</div>
+      <div class="name"><span class="pname" title="${escapeHtml(proc.description || proc.processName)}">${escapeHtml(proc.processName)}</span>${killBtn}</div>
+      <div class="n">
+        <span>${proc.connections.length}</span>
+        <span class="bar"><span style="transform:scaleX(${w})"></span></span>
+      </div>
+      <div class="meta">
+        <span>pid ${proc.pid}</span>
+        <span class="sep">·</span>
+        <span>${countryLabel}</span>
+        ${traffic ? `<span class="sep">·</span><span>${traffic}</span>` : ''}
+      </div>
     </div>
   `;
-  globeContainer.appendChild(talkers);
 
-  // Clear focused pin when clicking empty space on the globe.
-  globeContainer.addEventListener('click', (e) => {
-    // Only treat as "empty space" clicks that don't bubble from the HTML overlays.
-    if (e.target === globeContainer || e.target.tagName === 'CANVAS') {
-      if (focusedPinLabel) {
-        focusedPinLabel = null;
-        searchInput.value = '';
-        if (lastData) render(lastData);
-      }
-    }
-  });
-
-  const ro = new ResizeObserver(() => {
-    if (myGlobe) myGlobe.width(globeContainer.clientWidth).height(globeContainer.clientHeight);
-  });
-  ro.observe(globeContainer);
-
-  // Track pointer interaction on the globe's own canvas so live refreshes
-  // don't interrupt a drag/zoom gesture. Releasing flushes the latest payload.
-  const beginInteract = () => { globeInteracting = true; };
-  const endInteract = () => {
-    globeInteracting = false;
-    if (pendingGlobePayload) {
-      const { points, arcs, fingerprint } = pendingGlobePayload;
-      pendingGlobePayload = null;
-      lastGlobeFingerprint = fingerprint;
-      myGlobe.pointsData(points).arcsData(arcs);
-    }
-  };
-  globeContainer.addEventListener('pointerdown', beginInteract);
-  // Listen on window so releases outside the container still clear the flag.
-  window.addEventListener('pointerup', endInteract);
-  window.addEventListener('pointercancel', endInteract);
-  // Wheel zoom: brief pause while wheel events are arriving.
-  let wheelTimer = null;
-  globeContainer.addEventListener('wheel', () => {
-    beginInteract();
-    clearTimeout(wheelTimer);
-    wheelTimer = setTimeout(endInteract, 250);
-  }, { passive: true });
-
-  // Fetch country borders (non-blocking — the globe renders fine without them).
-  // Using jsdelivr's GitHub mirror of the three-globe example dataset.
-  loadCountryBorders();
-
-  // Drive the atmosphere pulse + lifecycle animations at ~30fps.
-  startGlobeAnimationLoop();
+  if (!expanded) return rowHtml;
+  return rowHtml + renderConnBlock(proc);
 }
 
-async function loadCountryBorders() {
-  const sources = [
-    'https://cdn.jsdelivr.net/gh/vasturiano/three-globe@master/example/country-polygons/ne_110m_admin_0_countries.geojson',
-    'https://raw.githubusercontent.com/vasturiano/three-globe/master/example/country-polygons/ne_110m_admin_0_countries.geojson',
-  ];
-  for (const url of sources) {
-    try {
-      const res = await fetch(url);
-      if (!res.ok) continue;
-      const data = await res.json();
-      const features = Array.isArray(data?.features) ? data.features : [];
-      if (features.length && myGlobe) myGlobe.polygonsData(features);
-      return;
-    } catch { /* try next source */ }
-  }
-}
+function renderConnBlock(proc) {
+  const rows = proc.connections.map(conn => {
+    const geo = conn.geo;
+    const f = flag(geo?.countryCode);
+    const countryLabel = geo
+      ? `${f}${geo.city ? ' ' + escapeHtml(geo.city) + ', ' : ' '}${escapeHtml(geo.country || '')}`
+      : 'resolving…';
 
-// Compute arc color respecting hover state, hovered process dim, and lifecycle.
-function arcColorFn(d, hoverArc) {
-  const lifecycle = arcLifecycle.get(d.arcKey);
-  let op = BASE_OPACITY;
+    const dom = conn.domain && conn.domain !== '-'
+      ? `<span class="dom">${escapeHtml(conn.domain)}</span>`
+      : '';
 
-  // Lifecycle: brighten new arcs, fade dying arcs.
-  if (lifecycle) {
-    const now = performance.now();
-    if (lifecycle.phase === 'new') {
-      const age = now - lifecycle.birth;
-      const t = Math.max(0, 1 - age / FLASH_DURATION_MS);
-      op = BASE_OPACITY + (HIGHLIGHT_OPACITY - BASE_OPACITY) * t;
-    } else if (lifecycle.phase === 'dying') {
-      const age = now - lifecycle.deathStarted;
-      const t = Math.max(0, 1 - age / DYING_DURATION_MS);
-      op = BASE_OPACITY * t;
-    }
-  }
+    const tKey = clientTrafficKey(conn.protocol, conn.localAddress, conn.localPort, conn.remoteAddress, conn.remotePort);
+    const live = liveTraffic.get(tKey);
+    const rx = live ? live.bytesIn : conn.bytesIn;
+    const tx = live ? live.bytesOut : conn.bytesOut;
 
-  // Process-hover dim: non-owned arcs get pushed way down.
-  if (hoveredPid != null && d.pid !== hoveredPid) {
-    op = Math.min(op, DIM_OPACITY);
-  } else if (hoveredPid != null && d.pid === hoveredPid) {
-    op = Math.max(op, 0.7);
-  }
-
-  // onArcHover emphasis wins over everything else for the hovered arc.
-  if (hoverArc) {
-    op = d === hoverArc ? 0.95 : Math.min(op, DIM_OPACITY);
-  }
-
-  return [`rgba(88, 166, 255, ${op})`, `rgba(249, 115, 22, ${op})`];
-}
-
-// Compute per-point color, with lifecycle flash and dissolve glitch applied.
-function pointColorFn(d) {
-  const now = performance.now();
-  const lifecycle = pinLifecycle.get(d.pinKey);
-
-  // Home pin is always cyan.
-  if (d.kind === 'home') return '#58a6ff';
-
-  // New-pin flash: fade from near-white → neon green → orange base color.
-  if (lifecycle?.phase === 'new') {
-    const age = now - lifecycle.birth;
-    const t = Math.min(1, age / FLASH_DURATION_MS);
-    // 0.0 → 0.35: white-hot (#ffffff)
-    // 0.35 → 0.7: neon green (#39ff14)
-    // 0.7 → 1.0: settle to orange (#f97316)
-    if (t < 0.35) return '#ffffff';
-    if (t < 0.7)  return '#39ff14';
-    return '#f97316';
-  }
-
-  // Closing-pin glitch: chromatic flicker between magenta and red, then fade to transparent.
-  if (lifecycle?.phase === 'dying') {
-    const age = now - lifecycle.deathStarted;
-    const t = Math.min(1, age / DYING_DURATION_MS);
-    // Fast flip between two colors for a glitch feel.
-    const blink = Math.floor(t * 8) % 2 === 0;
-    return blink ? '#ff2bd6' : '#f85149';
-  }
-
-  // Process hover dim.
-  if (hoveredPid != null) {
-    // If any connection for this pin belongs to the hovered process, keep bright.
-    // (Pins can be shared by multiple processes; d.pids is populated in updateGlobe.)
-    if (d.pids && d.pids.has(hoveredPid)) return '#f97316';
-    return '#30363d';
-  }
-
-  return '#f97316';
-}
-
-function updateGlobe(filteredProcesses) {
-  if (!myGlobe) return;
-
-  const points = [];
-  const arcs = [];
-  const seenPins = new Map();   // pinKey -> pin object (so we can merge pids)
-  const seenArcs = new Set();
-  const currentPinKeys = new Set();
-  const currentArcKeys = new Set();
-  const now = performance.now();
-
-  let homeLat = 0, homeLon = 0;
-  if (hostInfo?.geo) {
-    homeLat = hostInfo.geo.lat;
-    homeLon = hostInfo.geo.lon;
-    points.push({
-      kind: 'home',
-      pinKey: '__home__',
-      lat: homeLat,
-      lng: homeLon,
-      radius: 0.6,
-      color: '#58a6ff',
-    });
-    currentPinKeys.add('__home__');
-  }
-
-  // Reset per-frame bandwidth accumulator for the top-talkers panel.
-  const frameBandwidth = new Map(); // pinKey -> bytes this frame
-  const framePositiveDelta = new Map(); // pinKey -> summed positive per-conn delta this frame
-  const frameConnBytes = new Map(); // connId -> bytes (snapshot to swap into prevConnBytes at end)
-
-  for (const proc of filteredProcesses) {
-    for (const conn of proc.connections) {
-      const geo = conn.geo;
-      if (!geo || geo.country === 'Local' || (!geo.lat && !geo.lon)) continue;
-
-      const pinKey = `${geo.lat.toFixed(2)},${geo.lon.toFixed(2)}`;
-      const pinLabel = escapeHtml(geo.city || geo.country || conn.remoteAddress);
-
-      if (!seenPins.has(pinKey)) {
-        const countryRaw = [geo.city, geo.country].filter(Boolean).join(', ');
-        const pin = {
-          kind: 'dest',
-          pinKey,
-          pinLabel,
-          lat: geo.lat,
-          lng: geo.lon,
-          radius: 0.35,
-          color: '#f97316',
-          pids: new Set([proc.pid]),
-          label: `${geo.city ? escapeHtml(geo.city) + ', ' : ''}${escapeHtml(geo.country || '')}`,
-          countryRaw,
-        };
-        seenPins.set(pinKey, pin);
-        points.push(pin);
+    const canFirewall = !isPrivateIP(conn.remoteAddress) && !isLocalhost(conn.remoteAddress);
+    const blocked = blockedIPs.has(conn.remoteAddress);
+    const acts = [];
+    if (canFirewall) {
+      acts.push(`<button class="vt" data-action="vt" data-ip="${escapeHtml(conn.remoteAddress)}" title="VirusTotal lookup">VT</button>`);
+      if (blocked) {
+        acts.push(`<button class="unblock" data-action="unblock" data-ip="${escapeHtml(conn.remoteAddress)}" title="Remove from pf block table">Unblock</button>`);
       } else {
-        seenPins.get(pinKey).pids.add(proc.pid);
-      }
-      currentPinKeys.add(pinKey);
-
-      // Accumulate bytes for top-talkers (use latest per-connection totals).
-      const bytes = (conn.bytesIn || 0) + (conn.bytesOut || 0);
-      frameBandwidth.set(pinKey, (frameBandwidth.get(pinKey) || 0) + bytes);
-
-      // Per-connection delta detection for the spark/bump: a pin "bumps" when
-      // at least one of its connections moved bytes since the previous frame.
-      const connId = `${proc.pid}|${conn.localAddress || ''}|${conn.localPort || ''}|${conn.remoteAddress || ''}|${conn.remotePort || ''}`;
-      const prev = prevConnBytes.get(connId);
-      // Treat a previously-unseen connection carrying bytes as positive activity.
-      // If bytes < prev (counter reset / connection reuse) we don't subtract.
-      const delta = prev === undefined ? bytes : Math.max(0, bytes - prev);
-      if (delta > 0) {
-        framePositiveDelta.set(pinKey, (framePositiveDelta.get(pinKey) || 0) + delta);
-      }
-      frameConnBytes.set(connId, bytes);
-
-      if (hostInfo?.geo) {
-        const arcKey = `${proc.pid}:${homeLat},${homeLon}->${pinKey}`;
-        if (!seenArcs.has(arcKey)) {
-          seenArcs.add(arcKey);
-          const domainStr = conn.domain && conn.domain !== '-' ? ` (${escapeHtml(conn.domain)})` : '';
-          arcs.push({
-            arcKey,
-            pid: proc.pid,
-            startLat: homeLat, startLng: homeLon,
-            endLat: geo.lat, endLng: geo.lon,
-            label: `${escapeHtml(proc.processName)} &#8594; ${escapeHtml(conn.remoteAddress)}${domainStr}<br>${geo.city ? escapeHtml(geo.city) + ', ' : ''}${escapeHtml(geo.country)}`,
-          });
-          currentArcKeys.add(arcKey);
-        } else {
-          currentArcKeys.add(arcKey);
-        }
+        acts.push(`<button class="block" data-action="block" data-ip="${escapeHtml(conn.remoteAddress)}" title="Add to pf block table">Block</button>`);
       }
     }
-  }
+    const blockedTag = blocked ? '<span class="blocked-tag">BLOCKED</span>' : '';
 
-  // --- Update bandwidth store for Top Talkers ---
-  // Store raw (un-escaped) country; `renderTopTalkers` escapes at the sink.
-  for (const [pinKey, bytes] of frameBandwidth) {
-    const existing = pinBandwidth.get(pinKey);
-    const pin = seenPins.get(pinKey);
-    if (!pin) continue;
-    const bumped = (framePositiveDelta.get(pinKey) || 0) > 0;
-    pinBandwidth.set(pinKey, {
-      lat: pin.lat,
-      lng: pin.lng,
-      country: pin.countryRaw,
-      bytes,
-      lastBump: bumped ? now : (existing?.lastBump || 0),
-    });
-  }
-  // NOTE: pinBandwidth is pruned in the lifecycle cleanup below (in lockstep
-  // with `pinLifecycle.delete`) so dying pins can still rehydrate from it.
-
-  // Swap per-connection byte snapshot for next-frame delta computation.
-  prevConnBytes.clear();
-  for (const [connId, bytes] of frameConnBytes) prevConnBytes.set(connId, bytes);
-
-  // --- Lifecycle bookkeeping: mark new pins/arcs, and start dying for gone ones. ---
-  for (const pinKey of currentPinKeys) {
-    if (!pinLifecycle.has(pinKey) && pinKey !== '__home__') {
-      pinLifecycle.set(pinKey, { birth: now, phase: 'new', lastSeen: now });
-    } else if (pinLifecycle.has(pinKey)) {
-      const lc = pinLifecycle.get(pinKey);
-      // Revive a pin that was dying before we finished removing it.
-      if (lc.phase === 'dying') {
-        pinLifecycle.set(pinKey, { birth: now, phase: 'new', lastSeen: now });
-      } else {
-        lc.lastSeen = now;
-      }
-    }
-  }
-  // Pins that were in lifecycle but not seen this frame: transition to dying.
-  // The animation loop also does this decoupled from the poll cadence (so a
-  // 10-minute refresh setting still animates closures shortly after they
-  // actually happen).
-  for (const pinKey of pinLifecycle.keys()) {
-    if (!currentPinKeys.has(pinKey)) {
-      const lc = pinLifecycle.get(pinKey);
-      if (lc.phase !== 'dying') {
-        pinLifecycle.set(pinKey, { ...lc, phase: 'dying', deathStarted: now });
-      }
-    }
-  }
-  for (const arcKey of currentArcKeys) {
-    if (!arcLifecycle.has(arcKey)) {
-      arcLifecycle.set(arcKey, { birth: now, phase: 'new' });
-    } else {
-      const lc = arcLifecycle.get(arcKey);
-      if (lc.phase === 'dying') {
-        arcLifecycle.set(arcKey, { birth: now, phase: 'new' });
-      }
-    }
-  }
-  for (const arcKey of arcLifecycle.keys()) {
-    if (!currentArcKeys.has(arcKey)) {
-      const lc = arcLifecycle.get(arcKey);
-      if (lc.phase !== 'dying') {
-        arcLifecycle.set(arcKey, { ...lc, phase: 'dying', deathStarted: now });
-      }
-    }
-  }
-
-  // --- Include dying pins/arcs in the render payload until their animation completes. ---
-  // Pins that are dying but no longer in currentPinKeys still need to appear
-  // so the glitch-fade can play. Bandwidth cache is pruned *after* this loop
-  // (in the cleanup block below) so `last` is guaranteed non-null here.
-  for (const [pinKey, lc] of pinLifecycle) {
-    if (lc.phase === 'dying' && !currentPinKeys.has(pinKey)) {
-      const last = pinBandwidth.get(pinKey);
-      if (last) {
-        const labelRaw = last.country || '—';
-        points.push({
-          kind: 'dest',
-          pinKey,
-          pinLabel: escapeHtml(labelRaw),
-          lat: last.lat,
-          lng: last.lng,
-          radius: 0.35,
-          color: '#ff2bd6',
-          pids: new Set(),
-          label: `${escapeHtml(labelRaw)} (closing)`,
-          countryRaw: labelRaw,
-        });
-      }
-    }
-  }
-  for (const [arcKey, lc] of arcLifecycle) {
-    if (lc.phase === 'dying' && !currentArcKeys.has(arcKey)) {
-      // Dying arcs already sent to the scene remain; we just keep them alive
-      // in arcsData by not re-adding them. globe.gl drops them on next setter.
-      // To keep them visible during DYING_DURATION_MS we would need to
-      // retain their geometry; since we can't reconstruct lat/lng here cheaply,
-      // we accept a single-frame dropout for arcs and rely on the pin glitch
-      // to carry the closing visual.
-    }
-  }
-
-  // --- Clean up lifecycles once animations complete. ---
-  for (const [pinKey, lc] of pinLifecycle) {
-    if (lc.phase === 'new' && now - lc.birth > FLASH_DURATION_MS) {
-      pinLifecycle.set(pinKey, { ...lc, phase: 'live' });
-    }
-    if (lc.phase === 'dying' && now - lc.deathStarted > DYING_DURATION_MS) {
-      pinLifecycle.delete(pinKey);
-      pinBandwidth.delete(pinKey); // keep bandwidth cache in lockstep
-    }
-  }
-  for (const [arcKey, lc] of arcLifecycle) {
-    if (lc.phase === 'new' && now - lc.birth > FLASH_DURATION_MS) {
-      arcLifecycle.set(arcKey, { ...lc, phase: 'live' });
-    }
-    if (lc.phase === 'dying' && now - lc.deathStarted > DYING_DURATION_MS) {
-      arcLifecycle.delete(arcKey);
-    }
-  }
-
-  // Fingerprint — include presence of dying items so their removal triggers a redraw.
-  const fingerprint = points.map(p => `${p.lat.toFixed(2)},${p.lng.toFixed(2)},${p.color},${p.kind}`).sort().join('|')
-    + '#' + arcs.map(a => `${a.arcKey}`).sort().join('|')
-    + '#L:' + [...pinLifecycle].map(([k, v]) => `${k}:${v.phase}`).sort().join(',');
-  if (fingerprint === lastGlobeFingerprint) return;
-
-  if (globeInteracting) {
-    pendingGlobePayload = { points, arcs, fingerprint };
-    return;
-  }
-
-  // Scene actually changed — now it's safe to re-bind the color fn and
-  // swap geometry. Doing these unconditionally on every poll tick caused
-  // globe.gl (with pointsMerge(false)) to stutter mid-drag.
-  myGlobe.pointColor(pointColorFn);
-  lastGlobeFingerprint = fingerprint;
-  myGlobe.pointsData(points).arcsData(arcs);
-}
-
-// --- Animation loop: atmosphere pulse + per-frame color recomputes for lifecycles ---
-
-// A pin that hasn't been seen in this many ms gets flipped to 'dying' by the
-// animation loop — even if the next poll is still minutes away.
-const PIN_STALE_MS = 3000;
-
-function hasActiveLifecycle() {
-  // No allocations — early-exit iteration.
-  for (const lc of pinLifecycle.values()) {
-    if (lc.phase === 'new' || lc.phase === 'dying') return true;
-  }
-  for (const lc of arcLifecycle.values()) {
-    if (lc.phase === 'new' || lc.phase === 'dying') return true;
-  }
-  return false;
-}
-
-function startGlobeAnimationLoop() {
-  let last = 0;
-  let rafId = 0;
-  const interval = 1000 / ANIM_FPS;
-
-  function loop(t) {
-    rafId = requestAnimationFrame(loop);
-    if (t - last < interval) return;
-    last = t;
-    if (!myGlobe) return;
-    // CRITICAL: do nothing while the user is dragging/zooming. Any globe.gl
-    // setter call mid-gesture interrupts the orbit controller and the globe
-    // appears to "stick" on every refresh.
-    if (globeInteracting) return;
-
-    // --- Staleness-driven lifecycle transition (decoupled from poll cadence) ---
-    let transitioned = false;
-    const now = performance.now();
-    for (const [pinKey, lc] of pinLifecycle) {
-      if (lc.phase !== 'dying' && lc.lastSeen !== undefined &&
-          now - lc.lastSeen > PIN_STALE_MS) {
-        pinLifecycle.set(pinKey, { ...lc, phase: 'dying', deathStarted: now });
-        transitioned = true;
-      }
-      if (lc.phase === 'dying' && lc.deathStarted !== undefined &&
-          now - lc.deathStarted > DYING_DURATION_MS) {
-        pinLifecycle.delete(pinKey);
-        pinBandwidth.delete(pinKey);
-        transitioned = true;
-      }
-      if (lc.phase === 'new' && now - lc.birth > FLASH_DURATION_MS) {
-        pinLifecycle.set(pinKey, { ...lc, phase: 'live' });
-      }
-    }
-    if (transitioned) {
-      updateGlobe(lastFilteredProcesses);
-      renderTopTalkers();
-    }
-
-    // --- Atmosphere: stable light-blue neon. Altitude pulses with traffic;
-    //     hue stays locked to cyan (no more shifting to green). ---
-    let totalBytes = 0;
-    for (const v of pinBandwidth.values()) totalBytes += v.bytes;
-    const traffic = Math.min(1, Math.log10(1 + totalBytes) / 8);
-    const basePulse = 0.5 + 0.5 * Math.sin(t / (1400 - 400 * traffic));
-    const altitude = 0.14 + 0.04 * basePulse + 0.03 * traffic;
-    // hsl(195, 90%, 65%) ≈ #57d8ff — neon cyan.
-    const lightness = 62 + 4 * basePulse + 4 * traffic;
-    myGlobe.atmosphereAltitude(altitude)
-      .atmosphereColor(`hsl(195, 95%, ${lightness.toFixed(1)}%)`);
-
-    // --- Recompute colors so lifecycle flashes/dissolves animate smoothly ---
-    if (hasActiveLifecycle()) {
-      myGlobe.pointColor(pointColorFn);
-      myGlobe.arcColor(d => arcColorFn(d));
-    }
-  }
-
-  function start() {
-    if (rafId) return;
-    last = 0;
-    rafId = requestAnimationFrame(loop);
-  }
-  function stop() {
-    if (rafId) cancelAnimationFrame(rafId);
-    rafId = 0;
-  }
-
-  // Pause the loop entirely when the tab is backgrounded. Browsers throttle
-  // rAF anyway, but this also stops the 2s setInterval-ish setter churn on
-  // re-focus (setters still run via updateGlobe on poll ticks, not here).
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden) stop(); else start();
-  });
-
-  start();
-}
-
-// --- Top Talkers panel ---
-
-function renderTopTalkers() {
-  const listEl = document.getElementById('talkersList');
-  if (!listEl) return;
-
-  const entries = [...pinBandwidth.entries()]
-    .map(([pinKey, v]) => ({ pinKey, ...v }))
-    .sort((a, b) => b.bytes - a.bytes)
-    .slice(0, 3);
-
-  if (entries.length === 0) {
-    listEl.innerHTML = '<div class="talkers-empty">–– no traffic ––</div>';
-    return;
-  }
-
-  const now = performance.now();
-  listEl.innerHTML = entries.map((e, i) => {
-    const recentBump = now - e.lastBump < 1200;
-    return `<div class="talker-row ${recentBump ? 'talker-bump' : ''}">
-      <span class="talker-rank">${i + 1}</span>
-      <span class="talker-loc">${escapeHtml(e.country || '—')}</span>
-      <span class="talker-bytes">${escapeHtml(formatBytes(e.bytes))}</span>
-      <span class="talker-spark ${recentBump ? 'active' : ''}"></span>
-    </div>`;
+    return `
+      <div class="c" data-ip="${escapeHtml(conn.remoteAddress)}" data-traffic-key="${escapeHtml(tKey)}">
+        <span class="ip"><span class="proto">${escapeHtml(conn.protocol || '')}</span><b>${escapeHtml(conn.remoteAddress)}</b><span class="port">:${conn.remotePort}</span>${dom}</span>
+        <span class="meta">
+          <span>${countryLabel}</span>
+          <span class="rx" data-role="rx">↓${formatBytes(rx)}</span>
+          <span class="tx" data-role="tx">↑${formatBytes(tx)}</span>
+          ${blockedTag}
+        </span>
+        <span class="acts">${acts.join('')}</span>
+      </div>
+    `;
   }).join('');
+
+  return `<div class="conn">${rows}</div>`;
 }
 
-// --- Blocked IPs ---
+// ---------- Top talkers ----------
+function renderTopTalkers(sorted) {
+  // Aggregate cumulative bytes per country from currently visible conns.
+  const byCountry = new Map();
+  for (const p of sorted) {
+    for (const c of p.connections) {
+      if (!c.geo) continue;
+      const key = c.geo.country || c.geo.countryCode || '?';
+      const tk = clientTrafficKey(c.protocol, c.localAddress, c.localPort, c.remoteAddress, c.remotePort);
+      const live = liveTraffic.get(tk);
+      const b = (live ? live.bytesIn : (c.bytesIn || 0)) + (live ? live.bytesOut : (c.bytesOut || 0));
+      byCountry.set(key, (byCountry.get(key) || 0) + b);
+    }
+  }
+  const entries = [...byCountry.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6);
+  if (entries.length === 0) {
+    talkersListEl.innerHTML = '<div class="line"><span class="k">— no traffic —</span><span class="v"></span></div>';
+    return;
+  }
+  talkersListEl.innerHTML = entries.map(([country, bytes]) =>
+    `<div class="line"><span class="k">${escapeHtml(country)}</span><span class="v hot">${escapeHtml(formatBytes(bytes))}</span></div>`,
+  ).join('');
+}
 
+// ---------- Queue events ----------
+queueEl.addEventListener('click', (e) => {
+  const el = e.target.closest('[data-action]');
+  if (!el) return;
+  const action = el.dataset.action;
+  if (action === 'toggle') {
+    // Avoid toggling when clicking the inline kill button or anything inside the expanded conn block.
+    if (e.target.closest('.conn')) return;
+    const pid = Number(el.dataset.pid);
+    if (expandedPids.has(pid)) expandedPids.delete(pid);
+    else expandedPids.add(pid);
+    renderQueue();
+    return;
+  }
+  e.stopPropagation();
+  if (action === 'kill') {
+    killProcessAction(Number(el.dataset.pid), el.dataset.name, el.dataset.system === '1');
+  } else if (action === 'vt') {
+    vtCheckAction(el.dataset.ip);
+  } else if (action === 'block') {
+    blockIPAction(el.dataset.ip);
+  } else if (action === 'unblock') {
+    unblockIPAction(el.dataset.ip);
+  }
+});
+
+// ---------- Search / sort / chips ----------
+let searchTimer;
+qEl.addEventListener('input', () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => {
+    filter.q = qEl.value;
+    renderQueue();
+  }, 150);
+});
+
+sortSelect.addEventListener('change', () => {
+  footSort.textContent = sortSelect.value;
+  renderQueue();
+});
+
+chipsEl.addEventListener('click', (e) => {
+  const b = e.target.closest('.chip');
+  if (!b) return;
+  const f = b.dataset.f;
+  if (f === 'expandToggle') {
+    if (!lastData) return;
+    const visible = applyFilters(lastData);
+    const allOpen = visible.length > 0 && visible.every((p) => expandedPids.has(p.pid));
+    if (allOpen) {
+      expandedPids.clear();
+    } else {
+      for (const p of visible) expandedPids.add(p.pid);
+    }
+    renderQueue();
+    updateExpandToggle();
+    return;
+  }
+  b.classList.toggle('on');
+  if (f in filter) filter[f] = b.classList.contains('on');
+  renderQueue();
+});
+
+// Queue collapse
+qToggleBtn.addEventListener('click', () => {
+  document.body.classList.toggle('queue-collapsed');
+  const collapsed = document.body.classList.contains('queue-collapsed');
+  qToggleBtn.title = collapsed ? 'Expand process list' : 'Collapse process list';
+  qToggleIcon.setAttribute('d', collapsed ? 'M6 4 L11 8 L6 12' : 'M10 4 L5 8 L10 12');
+  window.dispatchEvent(new Event('resize'));
+});
+
+// Keyboard
+document.addEventListener('keydown', (e) => {
+  const tag = document.activeElement?.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+  if (e.key === '/') { e.preventDefault(); qEl.focus(); }
+  else if (e.key.toLowerCase() === 't') {
+    document.body.classList.toggle('tweaks-on');
+  }
+});
+
+// ---------- Clock ----------
+function tickClock() {
+  const d = new Date();
+  const p = n => String(n).padStart(2, '0');
+  clockT.textContent = `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  const month = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'][d.getMonth()];
+  clockD.textContent = `${p(d.getDate())} ${month} ${d.getFullYear()}`;
+}
+setInterval(tickClock, 1000); tickClock();
+footTz.textContent = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+// ---------- API: host info ----------
+async function fetchHostInfo({ fresh } = { fresh: false }) {
+  try {
+    const res = await fetch('/api/host-info' + (fresh ? '?fresh=1' : ''));
+    if (!res.ok) return;
+    hostInfo = await res.json();
+    hostHostname.textContent = hostInfo.hostname || '—';
+    hostLocalIP.textContent = hostInfo.localIP || '—';
+    hostPublicIP.textContent = hostInfo.publicIP || '—';
+    if (hostInfo.geo) {
+      const f = flag(hostInfo.geo.countryCode);
+      const locText = `${hostInfo.geo.city ? hostInfo.geo.city + ', ' : ''}${hostInfo.geo.country || ''}`;
+      hostLocation.innerHTML = `${f} ${escapeHtml(hostInfo.geo.city ? hostInfo.geo.city + ', ' : '')}${escapeHtml(hostInfo.geo.country || '')}`;
+      hostISP.textContent = hostInfo.geo.isp || '—';
+      if (queueISP) queueISP.textContent = hostInfo.geo.isp || '—';
+      if (queueGeo) queueGeo.innerHTML = `${f} ${escapeHtml(locText)}`;
+      radarSetHome(hostInfo.geo.lat, hostInfo.geo.lon);
+    }
+  } catch { /* silent */ }
+}
+
+// ---------- API: connections ----------
+async function fetchConnections() {
+  try {
+    const res = await fetch('/api/connections');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    lastData = data;
+    statusText.textContent = 'streaming · live';
+    statusText.classList.remove('err', 'wait');
+    renderQueue();
+  } catch (err) {
+    statusText.textContent = 'error';
+    statusText.classList.add('err');
+  }
+}
+
+// ---------- API: blocked ----------
 async function fetchBlockedIPs() {
   try {
     const res = await fetch('/api/blocked');
     if (!res.ok) return;
     const ips = await res.json();
     blockedIPs = new Set(ips);
-  } catch { /* ignore */ }
+  } catch { /* silent */ }
+  // Pull richer metadata (country, blockedAt) from the history endpoint.
+  try {
+    const res = await fetch('/api/block-history');
+    if (!res.ok) throw 0;
+    const data = await res.json();
+    blockedMeta = new Map();
+    for (const rec of (data.active || [])) {
+      blockedMeta.set(rec.ip, { country: rec.country, blockedAt: rec.blockedAt });
+    }
+  } catch { /* silent */ }
+  renderBlockedPanel();
+  if (blockedCountEl) blockedCountEl.textContent = blockedIPs.size;
+  blockedCntBig.textContent = blockedIPs.size;
+  footBlocked.textContent = blockedIPs.size;
+  if (lastData) renderQueue();
 }
 
+function renderBlockedPanel() {
+  const ips = [...blockedIPs];
+  const q = blockedQ.toLowerCase();
+  const filtered = ips.filter(ip => {
+    const meta = blockedMeta.get(ip);
+    const hay = `${ip} ${meta?.country || ''}`.toLowerCase();
+    return !q || hay.includes(q);
+  });
+  if (filtered.length === 0) {
+    blockedListEl.innerHTML = `<div class="blocked-empty">${q ? `No blocked addresses match “${escapeHtml(q)}”` : 'No IPs currently blocked'}</div>`;
+    return;
+  }
+  blockedListEl.innerHTML = filtered.map(ip => {
+    const meta = blockedMeta.get(ip) || {};
+    const cc = meta.country || '';
+    const f = flag(cc);
+    const when = meta.blockedAt ? relTime(meta.blockedAt) : '—';
+    return `
+      <div class="blocked-row" data-ip="${escapeHtml(ip)}">
+        <span class="ip">${escapeHtml(ip)}</span>
+        <span class="cc">${f} ${escapeHtml(cc)}</span>
+        <span class="host"></span>
+        <span class="when">${escapeHtml(when)}</span>
+        <button class="un" data-action="unblock" data-ip="${escapeHtml(ip)}">Unblock</button>
+      </div>
+    `;
+  }).join('');
+}
+
+function relTime(ts) {
+  const diff = Date.now() - ts;
+  if (diff < 60_000) return `${Math.round(diff / 1000)}s ago`;
+  if (diff < 3_600_000) return `${Math.round(diff / 60_000)}m ago`;
+  if (diff < 86_400_000) return `${Math.round(diff / 3_600_000)}h ago`;
+  return `${Math.round(diff / 86_400_000)}d ago`;
+}
+
+blockedSearch.addEventListener('input', () => {
+  blockedQ = blockedSearch.value;
+  renderBlockedPanel();
+});
+blockedListEl.addEventListener('click', (e) => {
+  const b = e.target.closest('[data-action="unblock"]');
+  if (!b) return;
+  unblockIPAction(b.dataset.ip);
+});
+blockedExport.addEventListener('click', () => {
+  const rows = [...blockedIPs].map(ip => {
+    const m = blockedMeta.get(ip) || {};
+    return `${ip},${m.country || ''},${m.blockedAt ? new Date(m.blockedAt).toISOString() : ''}`;
+  });
+  const csv = 'ip,country,blockedAt\n' + rows.join('\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'netwatcher-blocked.csv';
+  a.click();
+});
+blockedAdd.addEventListener('click', () => blockIPManualAction());
+blockedHistoryBtn.addEventListener('click', () => showBlockedListModal());
+
+// ---------- Firewall / VT / Kill ----------
 async function sendFirewallRequest(path, ip, password) {
-  // Send password to local backend (127.0.0.1 only). The value lives in this
-  // function scope; after the body is serialized we overwrite the local ref.
   let body = JSON.stringify({ password });
   password = '';
   try {
@@ -926,14 +581,13 @@ function blockIPAction(ip) {
       showToast(result.message, result.success ? 'success' : 'error');
       if (result.success) {
         blockedIPs.add(ip);
-        if (lastData) render(lastData);
+        await fetchBlockedIPs();
       }
     } catch (err) {
       showToast('Failed to block IP: ' + err.message, 'error');
     }
   });
 }
-
 function unblockIPAction(ip) {
   askSudoPassword('Unblock', ip, async (password) => {
     if (!password) return;
@@ -943,7 +597,7 @@ function unblockIPAction(ip) {
       showToast(result.message, result.success ? 'success' : 'error');
       if (result.success) {
         blockedIPs.delete(ip);
-        if (lastData) render(lastData);
+        await fetchBlockedIPs();
       }
     } catch (err) {
       showToast('Failed to unblock IP: ' + err.message, 'error');
@@ -951,10 +605,29 @@ function unblockIPAction(ip) {
   });
 }
 
-// --- VirusTotal ---
+function killProcessAction(pid, name, isSystem) {
+  if (isSystem) {
+    showConfirmDialog(
+      `"${name}" is a system process required for system stability. Are you sure you want to kill it?`,
+      () => doKill(pid),
+    );
+    return;
+  }
+  doKill(pid);
+}
+async function doKill(pid) {
+  try {
+    const res = await fetch(`/api/kill/${pid}`, { method: 'POST', headers: CSRF_HEADER });
+    const result = await res.json();
+    showToast(result.message, result.success ? 'success' : 'error');
+    setTimeout(fetchConnections, 500);
+  } catch (err) {
+    showToast('Failed to kill process: ' + err.message, 'error');
+  }
+}
 
 async function vtCheckAction(ip) {
-  showVtModal(ip, 'Loading VirusTotal data...');
+  showVtModal(ip, 'Loading VirusTotal data…');
   try {
     const res = await fetch(`/api/vt/${encodeURIComponent(ip)}`);
     const data = await res.json();
@@ -964,21 +637,96 @@ async function vtCheckAction(ip) {
   }
 }
 
+// ---------- Modals ----------
+function showToast(message, type) {
+  const existing = document.querySelector('.toast');
+  if (existing) existing.remove();
+  const toast = document.createElement('div');
+  toast.className = `toast ${type || ''}`;
+  toast.textContent = message;
+  document.body.appendChild(toast);
+  setTimeout(() => toast.remove(), 3000);
+}
+
+function showConfirmDialog(message, onConfirm) {
+  const existing = document.getElementById('confirmOverlay');
+  if (existing) existing.remove();
+  const overlay = document.createElement('div');
+  overlay.id = 'confirmOverlay';
+  overlay.className = 'confirm-overlay';
+  overlay.innerHTML = `
+    <div class="confirm-dialog">
+      <div class="confirm-icon">⚠</div>
+      <div class="confirm-message">${escapeHtml(message)}</div>
+      <div class="confirm-actions">
+        <button class="confirm-btn confirm-cancel">Cancel</button>
+        <button class="confirm-btn confirm-kill">Kill Anyway</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  overlay.querySelector('.confirm-cancel').addEventListener('click', () => overlay.remove());
+  overlay.querySelector('.confirm-kill').addEventListener('click', () => { overlay.remove(); onConfirm(); });
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+}
+
+function askSudoPassword(action, ip, onSubmit) {
+  const existing = document.getElementById('sudoOverlay');
+  if (existing) existing.remove();
+  const overlay = document.createElement('div');
+  overlay.id = 'sudoOverlay';
+  overlay.className = 'confirm-overlay';
+  overlay.innerHTML = `
+    <div class="confirm-dialog sudo-dialog">
+      <div class="confirm-icon">⚠</div>
+      <div class="confirm-message">
+        <div class="sudo-title">sudo operation</div>
+        <div class="sudo-body">
+          <strong>${escapeHtml(action)}</strong> runs <code>pfctl</code> as root to modify the firewall.<br>
+          Target IP: <code>${escapeHtml(ip)}</code>
+        </div>
+        <div class="sudo-note">Your password is sent once to the local server and <strong>never stored</strong>.</div>
+      </div>
+      <input type="password" class="sudo-input" placeholder="System password" autocomplete="off" autocapitalize="off" spellcheck="false" />
+      <div class="confirm-actions">
+        <button class="confirm-btn confirm-cancel">Cancel</button>
+        <button class="confirm-btn confirm-kill sudo-submit">Proceed</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  const input = overlay.querySelector('.sudo-input');
+  input.focus();
+  const cleanup = (submitted) => {
+    let pwd = submitted ? input.value : '';
+    input.value = '';
+    overlay.remove();
+    return pwd;
+  };
+  const cancel = () => { cleanup(false); };
+  const submit = () => onSubmit(cleanup(true));
+  overlay.querySelector('.confirm-cancel').addEventListener('click', cancel);
+  overlay.querySelector('.sudo-submit').addEventListener('click', submit);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); submit(); }
+    else if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+  });
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) cancel(); });
+}
+
 function showVtModal(ip, content, success) {
   const existing = document.getElementById('vtOverlay');
   if (existing) existing.remove();
-
-  const formattedContent = formatVtOutput(content, success);
   const overlay = document.createElement('div');
   overlay.id = 'vtOverlay';
   overlay.className = 'confirm-overlay';
   overlay.innerHTML = `
     <div class="vt-modal">
       <div class="vt-modal-header">
-        <span class="vt-modal-title">VirusTotal: ${escapeHtml(ip)}</span>
-        <button class="vt-modal-close">&times;</button>
+        <span class="vt-modal-title">VirusTotal · ${escapeHtml(ip)}</span>
+        <button class="vt-modal-close">×</button>
       </div>
-      <div class="vt-modal-body">${formattedContent}</div>
+      <div class="vt-modal-body">${formatVtOutput(content, success)}</div>
     </div>
   `;
   document.body.appendChild(overlay);
@@ -989,8 +737,7 @@ function showVtModal(ip, content, success) {
 function formatVtOutput(raw, success) {
   if (success === undefined) return `<div class="vt-loading">${escapeHtml(raw)}</div>`;
   if (!success) return `<pre class="vt-output vt-error">${escapeHtml(raw)}</pre>`;
-
-  const lines = raw.split('\n');
+  const lines = String(raw).split('\n');
   let html = '';
   for (const line of lines) {
     const trimmed = line.trim();
@@ -1013,178 +760,18 @@ function formatVtOutput(raw, success) {
   return `<div class="vt-output">${html}</div>`;
 }
 
-// --- Host Info ---
-
-async function fetchHostInfo({ fresh } = { fresh: false }) {
-  try {
-    const res = await fetch('/api/host-info' + (fresh ? '?fresh=1' : ''));
-    if (!res.ok) return;
-    hostInfo = await res.json();
-
-    document.getElementById('hostHostname').textContent = hostInfo.hostname;
-    document.getElementById('hostLocalIP').textContent = hostInfo.localIP;
-    document.getElementById('hostPublicIP').textContent = hostInfo.publicIP;
-
-    if (hostInfo.geo) {
-      const city = hostInfo.geo.city ? escapeHtml(hostInfo.geo.city) + ', ' : '';
-      const f = flag(hostInfo.geo.countryCode);
-      document.getElementById('hostLocation').innerHTML = `${f} ${city}${escapeHtml(hostInfo.geo.country)}`;
-      document.getElementById('hostISP').textContent = hostInfo.geo.isp;
-
-      if (myGlobe && hostInfo.geo.lat && hostInfo.geo.lon) {
-        myGlobe.pointOfView({ lat: hostInfo.geo.lat, lng: hostInfo.geo.lon, altitude: 2.5 }, 4000);
-      }
-    }
-  } catch { /* ignore */ }
-}
-
-// --- Data fetching ---
-
-async function fetchConnections() {
-  try {
-    const res = await fetch('/api/connections');
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    lastData = data;
-
-    statusDot.className = 'status-dot connected';
-    statusText.textContent = 'Live';
-
-    render(data);
-  } catch (err) {
-    statusDot.className = 'status-dot error';
-    statusText.textContent = 'Error: ' + err.message;
-  }
-}
-
-// --- Actions ---
-
-function toggleProcess(pid) {
-  if (expandedPids.has(pid)) expandedPids.delete(pid);
-  else expandedPids.add(pid);
-  if (lastData) render(lastData);
-}
-
-function expandAll() {
-  if (!lastData) return;
-  const filtered = applyFilters(lastData);
-  for (const proc of filtered) expandedPids.add(proc.pid);
-  render(lastData);
-}
-
-function collapseAll() {
-  expandedPids.clear();
-  if (lastData) render(lastData);
-}
-
-function killProcessAction(pid, name, isSystem) {
-  if (isSystem) {
-    showConfirmDialog(
-      `"${name}" is a system process required for system stability. Are you sure you want to kill it?`,
-      () => doKill(pid)
-    );
-    return;
-  }
-  doKill(pid);
-}
-
-async function doKill(pid) {
-  const btn = document.querySelector(`.process-card[data-pid="${pid}"] .kill-btn`);
-  if (btn) { btn.classList.add('killing'); btn.textContent = 'Killing...'; }
-  try {
-    const res = await fetch(`/api/kill/${pid}`, { method: 'POST', headers: CSRF_HEADER });
-    const result = await res.json();
-    showToast(result.message, result.success ? 'success' : 'error');
-    setTimeout(fetchConnections, 500);
-  } catch (err) {
-    showToast('Failed to kill process: ' + err.message, 'error');
-  }
-}
-
-appEl.addEventListener('click', (e) => {
-  const target = e.target.closest('[data-action]');
-  if (!target) return;
-  const action = target.dataset.action;
-  if (action === 'toggle') {
-    toggleProcess(parseInt(target.dataset.pid, 10));
-    return;
-  }
-  e.stopPropagation();
-  if (action === 'kill') {
-    killProcessAction(parseInt(target.dataset.pid, 10), target.dataset.name, target.dataset.system === '1');
-  } else if (action === 'vt') {
-    vtCheckAction(target.dataset.ip);
-  } else if (action === 'block') {
-    blockIPAction(target.dataset.ip);
-  } else if (action === 'unblock') {
-    unblockIPAction(target.dataset.ip);
-  }
-});
-
-// --- Hover a process card → highlight its arcs on the globe ---
-
-appEl.addEventListener('mouseover', (e) => {
-  const card = e.target.closest('.process-card');
-  if (!card) return;
-  const pid = parseInt(card.dataset.pid, 10);
-  if (pid === hoveredPid) return;
-  hoveredPid = pid;
-  card.classList.add('process-hovered');
-  if (myGlobe) {
-    myGlobe.pointColor(pointColorFn);
-    myGlobe.arcColor(d => arcColorFn(d));
-  }
-});
-
-appEl.addEventListener('mouseout', (e) => {
-  const card = e.target.closest('.process-card');
-  if (!card) return;
-  // Only clear if we're leaving the card entirely (not moving to a child).
-  const related = e.relatedTarget;
-  if (related && card.contains(related)) return;
-  hoveredPid = null;
-  card.classList.remove('process-hovered');
-  if (myGlobe) {
-    myGlobe.pointColor(pointColorFn);
-    myGlobe.arcColor(d => arcColorFn(d));
-  }
-});
-
-function showConfirmDialog(message, onConfirm) {
-  const existing = document.getElementById('confirmOverlay');
-  if (existing) existing.remove();
-
-  const overlay = document.createElement('div');
-  overlay.id = 'confirmOverlay';
-  overlay.className = 'confirm-overlay';
-  overlay.innerHTML = `
-    <div class="confirm-dialog">
-      <div class="confirm-icon">&#9888;</div>
-      <div class="confirm-message">${escapeHtml(message)}</div>
-      <div class="confirm-actions">
-        <button class="confirm-btn confirm-cancel">Cancel</button>
-        <button class="confirm-btn confirm-kill">Kill Anyway</button>
-      </div>
-    </div>
-  `;
-  document.body.appendChild(overlay);
-  overlay.querySelector('.confirm-cancel').addEventListener('click', () => overlay.remove());
-  overlay.querySelector('.confirm-kill').addEventListener('click', () => { overlay.remove(); onConfirm(); });
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
-}
-
+// ---------- Blocked history modal (full history + bulk actions) ----------
 async function showBlockedListModal() {
   const existing = document.getElementById('blockedListOverlay');
   if (existing) existing.remove();
-
   const overlay = document.createElement('div');
   overlay.id = 'blockedListOverlay';
   overlay.className = 'confirm-overlay';
   overlay.innerHTML = `
     <div class="blocked-modal">
       <div class="vt-modal-header">
-        <span class="vt-modal-title">Blocked IPs</span>
-        <button class="vt-modal-close" data-close="1">&times;</button>
+        <span class="vt-modal-title">Blocked IPs · History</span>
+        <button class="vt-modal-close" data-close="1">×</button>
       </div>
       <div class="blocked-modal-body"><div class="vt-loading">Loading…</div></div>
     </div>
@@ -1193,17 +780,12 @@ async function showBlockedListModal() {
   overlay.addEventListener('click', (e) => {
     if (e.target === overlay || e.target.dataset.close === '1') overlay.remove();
   });
-
   await renderBlockedListBody(overlay, { selectMode: false });
 }
 
-// Populate the modal body. Called on open and after any (un)block action to
-// refresh both the row list and the header toolbar in-place, preserving the
-// current select-mode state.
 async function renderBlockedListBody(overlay, { selectMode }) {
   const body = overlay.querySelector('.blocked-modal-body');
   body.innerHTML = '<div class="vt-loading">Loading…</div>';
-
   let data;
   try {
     const res = await fetch('/api/block-history');
@@ -1212,43 +794,32 @@ async function renderBlockedListBody(overlay, { selectMode }) {
     body.innerHTML = `<div class="vt-output vt-error">Failed to load: ${escapeHtml(err.message)}</div>`;
     return;
   }
-
   const rows = buildBlockedRows(data.history || []);
   const hasActive = rows.some(r => r.status === 'active');
   const effectiveSelect = selectMode && hasActive;
-
   const toolbar = `
     <div class="blocked-toolbar">
-      <button class="blocked-add-ip" data-action="manual-add">+ Block IP…</button>
-      <button class="blocked-select-toggle ${effectiveSelect ? 'active' : ''}" ${hasActive ? '' : 'disabled'} data-action="toggle-select">
-        ${effectiveSelect ? 'Cancel' : 'Select'}
-      </button>
-      <button class="blocked-bulk-unblock" data-action="unblock-selected" ${effectiveSelect ? '' : 'hidden'} disabled>
-        Unblock Selected <span class="blocked-sel-count">(0)</span>
-      </button>
+      <button data-action="manual-add">+ Block IP…</button>
+      <button class="${effectiveSelect ? 'active' : ''}" ${hasActive ? '' : 'disabled'} data-action="toggle-select">${effectiveSelect ? 'Cancel' : 'Select'}</button>
+      <button data-action="unblock-selected" ${effectiveSelect ? '' : 'hidden'} disabled>Unblock Selected <span class="blocked-sel-count">(0)</span></button>
     </div>
   `;
-
   if (rows.length === 0) {
     body.innerHTML = toolbar + '<div class="blocked-empty">No blocks recorded yet.</div>';
     wireBlockedToolbar(body, overlay, effectiveSelect);
     return;
   }
-
   body.innerHTML = toolbar + `
     <table class="blocked-table ${effectiveSelect ? 'select-mode' : ''}">
       <thead><tr>
-        ${effectiveSelect ? '<th class="blocked-col-sel"></th>' : ''}
-        <th>IP</th><th>Country</th><th>Blocked At</th><th>Status</th>
-        <th class="blocked-col-action"></th>
+        ${effectiveSelect ? '<th></th>' : ''}
+        <th>IP</th><th>Country</th><th>Blocked At</th><th>Status</th><th></th>
       </tr></thead>
       <tbody>${rows.map(r => {
         const isActive = r.status === 'active';
         const ipEsc = escapeHtml(r.ip);
         return `<tr data-ip="${ipEsc}" data-active="${isActive ? '1' : '0'}">
-          ${effectiveSelect ? `<td class="blocked-col-sel">${isActive
-            ? `<input type="checkbox" class="blocked-row-check" aria-label="Select ${ipEsc}">`
-            : ''}</td>` : ''}
+          ${effectiveSelect ? `<td>${isActive ? `<input type="checkbox" class="blocked-row-check">` : ''}</td>` : ''}
           <td><code>${ipEsc}</code></td>
           <td>${r.country ? escapeHtml(r.country) : '<span class="geo-unknown">-</span>'}</td>
           <td>${escapeHtml(formatTime(r.blockedAt))}</td>
@@ -1257,28 +828,15 @@ async function renderBlockedListBody(overlay, { selectMode }) {
             : r.status === 'superseded'
               ? `<span class="geo-unknown">Replaced ${escapeHtml(formatTime(r.unblockedAt))}</span>`
               : `<span class="geo-unknown">Unblocked ${escapeHtml(formatTime(r.unblockedAt))}</span>`}</td>
-          <td class="blocked-col-action">
-            ${isActive
-              ? `<button class="blocked-row-unblock" data-unblock="${ipEsc}">Unblock</button>`
-              : `<div class="blocked-row-actions">
-                   <button class="blocked-row-reblock icon-btn" data-reblock="${ipEsc}" title="Re-block ${ipEsc}" aria-label="Re-block">
-                     <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                       <path d="M21 12a9 9 0 1 1-3-6.7"/>
-                       <polyline points="21 4 21 10 15 10"/>
-                     </svg>
-                   </button>
-                   <button class="blocked-row-remove icon-btn" data-remove="${ipEsc}"
-                     data-blocked-at="${r.blockedAt}"
-                     ${r.status === 'unblocked' ? `data-unblocked-at="${r.unblockedAt}"` : ''}
-                     title="Delete this entry" aria-label="Delete row">
-                     <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                       <polyline points="3 6 5 6 21 6"/>
-                       <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
-                       <path d="M10 11v6M14 11v6"/>
-                       <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
-                     </svg>
-                   </button>
-                 </div>`}
+          <td>${isActive
+            ? `<button class="blocked-row-unblock" data-unblock="${ipEsc}">Unblock</button>`
+            : `<span class="blocked-row-actions">
+                 <button class="blocked-row-reblock icon-btn" data-reblock="${ipEsc}" title="Re-block">⟲</button>
+                 <button class="blocked-row-remove icon-btn" data-remove="${ipEsc}"
+                   data-blocked-at="${r.blockedAt}"
+                   ${r.status === 'unblocked' ? `data-unblocked-at="${r.unblockedAt}"` : ''}
+                   title="Delete row">🗑</button>
+               </span>`}
           </td>
         </tr>`;
       }).join('')}
@@ -1286,7 +844,6 @@ async function renderBlockedListBody(overlay, { selectMode }) {
     </table>
   `;
   wireBlockedToolbar(body, overlay, effectiveSelect);
-
 }
 
 function wireBlockedToolbar(body, overlay, selectMode) {
@@ -1294,89 +851,61 @@ function wireBlockedToolbar(body, overlay, selectMode) {
   const bulkBtn = body.querySelector('[data-action="unblock-selected"]');
   const addBtn = body.querySelector('[data-action="manual-add"]');
   const countEl = body.querySelector('.blocked-sel-count');
-
   const updateBulkState = () => {
     const n = body.querySelectorAll('.blocked-row-check:checked').length;
     if (countEl) countEl.textContent = `(${n})`;
     if (bulkBtn) bulkBtn.disabled = n === 0;
   };
-
-  if (toggleBtn) {
-    toggleBtn.addEventListener('click', () => {
-      renderBlockedListBody(overlay, { selectMode: !selectMode });
-    });
-  }
-
-  if (addBtn) {
-    addBtn.addEventListener('click', () => blockIPManualAction(overlay, selectMode));
-  }
-
-  body.querySelectorAll('.blocked-row-check').forEach(cb => {
-    cb.addEventListener('change', updateBulkState);
+  if (toggleBtn) toggleBtn.addEventListener('click', () => renderBlockedListBody(overlay, { selectMode: !selectMode }));
+  if (addBtn) addBtn.addEventListener('click', () => blockIPManualAction(overlay, selectMode));
+  body.querySelectorAll('.blocked-row-check').forEach(cb => cb.addEventListener('change', updateBulkState));
+  if (bulkBtn) bulkBtn.addEventListener('click', () => {
+    const ips = Array.from(body.querySelectorAll('.blocked-row-check:checked')).map(cb => cb.closest('tr')?.dataset.ip).filter(Boolean);
+    if (ips.length === 0) return;
+    unblockBulkAction(ips, overlay);
   });
-
-  if (bulkBtn) {
-    bulkBtn.addEventListener('click', () => {
-      const ips = Array.from(body.querySelectorAll('.blocked-row-check:checked'))
-        .map(cb => cb.closest('tr')?.dataset.ip)
-        .filter(Boolean);
-      if (ips.length === 0) return;
-      unblockBulkAction(ips, overlay);
-    });
-  }
-
-  // Per-row Unblock
   body.querySelectorAll('.blocked-row-unblock').forEach(btn => {
     btn.addEventListener('click', () => {
       const ip = btn.dataset.unblock;
-      if (!ip) return;
       askSudoPassword('Unblock', ip, async (password) => {
         if (!password) return;
         try {
-          const result = await sendFirewallRequest(`/api/unblock/${encodeURIComponent(ip)}`, ip, password);
+          const r = await sendFirewallRequest(`/api/unblock/${encodeURIComponent(ip)}`, ip, password);
           password = '';
-          showToast(result.message, result.success ? 'success' : 'error');
-          if (result.success) {
-            blockedIPs.delete(ip);
-            if (lastData) render(lastData);
-            await renderBlockedListBody(overlay, { selectMode });
-          }
-        } catch (err) {
-          showToast('Failed to unblock IP: ' + err.message, 'error');
-        }
+          showToast(r.message, r.success ? 'success' : 'error');
+          if (r.success) { blockedIPs.delete(ip); await fetchBlockedIPs(); await renderBlockedListBody(overlay, { selectMode }); }
+        } catch (err) { showToast('Failed to unblock IP: ' + err.message, 'error'); }
       });
     });
   });
-
-  // Per-row Remove — delete all history events for the IP (unblocked rows only).
-  // Server refuses if the IP is still actively blocked, so this is a safe op.
-  // If the same IP has multiple historical sessions, deleting from any one
-  // removes them all — the user typically expects "clear this IP from history".
+  body.querySelectorAll('.blocked-row-reblock').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const ip = btn.dataset.reblock;
+      askSudoPassword('Block', ip, async (password) => {
+        if (!password) return;
+        try {
+          const r = await sendFirewallRequest(`/api/block/${encodeURIComponent(ip)}`, ip, password);
+          password = '';
+          showToast(r.message, r.success ? 'success' : 'error');
+          if (r.success) { blockedIPs.add(ip); await fetchBlockedIPs(); await renderBlockedListBody(overlay, { selectMode }); }
+        } catch (err) { showToast('Failed to reblock IP: ' + err.message, 'error'); }
+      });
+    });
+  });
   body.querySelectorAll('.blocked-row-remove').forEach(btn => {
     btn.addEventListener('click', async () => {
       if (btn.disabled) return;
       const ip = btn.dataset.remove;
       const blockedAt = btn.dataset.blockedAt;
       if (!ip || !blockedAt) return;
-      // Guard against double-click racing the in-flight DELETE.
       btn.disabled = true;
       try {
-        // Only send unblockedAt for rows that actually had an unblock
-        // event. For 'superseded' rows the row's end time is another
-        // block's timestamp, not a real unblock record to delete.
         const q = new URLSearchParams({ blockedAt });
         if (btn.dataset.unblockedAt) q.set('unblockedAt', btn.dataset.unblockedAt);
-        const res = await fetch(`/api/block-history/${encodeURIComponent(ip)}?${q}`, {
-          method: 'DELETE',
-          headers: CSRF_HEADER,
-        });
+        const res = await fetch(`/api/block-history/${encodeURIComponent(ip)}?${q}`, { method: 'DELETE', headers: CSRF_HEADER });
         const result = await res.json();
         if (res.ok && result.success) {
-          const n = result.removed ?? 0;
-          showToast(
-            n === 0 ? `Nothing to remove for ${ip}` : `Removed row for ${ip}`,
-            'success',
-          );
+          showToast(result.removed === 0 ? `Nothing to remove for ${ip}` : `Removed row for ${ip}`, 'success');
           await renderBlockedListBody(overlay, { selectMode });
         } else {
           showToast(result.message || 'Failed to remove row', 'error');
@@ -1388,66 +917,31 @@ function wireBlockedToolbar(body, overlay, selectMode) {
       }
     });
   });
-
-  // Per-row Reblock (unblocked history rows)
-  body.querySelectorAll('.blocked-row-reblock').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const ip = btn.dataset.reblock;
-      if (!ip) return;
-      askSudoPassword('Block', ip, async (password) => {
-        if (!password) return;
-        try {
-          const result = await sendFirewallRequest(`/api/block/${encodeURIComponent(ip)}`, ip, password);
-          password = '';
-          showToast(result.message, result.success ? 'success' : 'error');
-          if (result.success) {
-            blockedIPs.add(ip);
-            if (lastData) render(lastData);
-            await renderBlockedListBody(overlay, { selectMode });
-          }
-        } catch (err) {
-          showToast('Failed to reblock IP: ' + err.message, 'error');
-        }
-      });
-    });
-  });
 }
 
-// Client-side IP sanity check — stops obvious typos before prompting the
-// user for their sudo password. The server re-validates with net.isIP()
-// and rejects loopback/unspecified, so this is a UX filter, not security.
-// Accepts dotted-quad IPv4 and colon-separated IPv6 (including `::` and
-// `::ffff:1.2.3.4` forms).
 function looksLikeIP(s) {
   if (typeof s !== 'string') return false;
   const v = s.trim();
   if (v.length === 0 || v.length > 45) return false;
-  // IPv4: four 1-3 digit octets separated by dots.
-  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(v)) {
-    return v.split('.').every((o) => Number(o) <= 255);
-  }
-  // IPv6: must contain a colon, only hex/colon/dot (for ::ffff:v4).
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(v)) return v.split('.').every(o => Number(o) <= 255);
   if (v.includes(':') && /^[0-9a-fA-F:.]+$/.test(v)) return true;
   return false;
 }
 
-// Dialog: manual IP entry → sudo prompt → /api/block. Reused styling from
-// the sudo-dialog so theming stays consistent.
 function blockIPManualAction(overlay, selectMode) {
   const existing = document.getElementById('manualBlockOverlay');
   if (existing) existing.remove();
-
   const dialog = document.createElement('div');
   dialog.id = 'manualBlockOverlay';
   dialog.className = 'confirm-overlay';
   dialog.innerHTML = `
     <div class="confirm-dialog sudo-dialog">
-      <div class="confirm-icon">&#9888;</div>
+      <div class="confirm-icon">⚠</div>
       <div class="confirm-message">
         <div class="sudo-title">Block IP manually</div>
-        <div class="sudo-body">Add an IPv4 or IPv6 address to the <code>pfctl</code> block table without picking it from the connection list.</div>
+        <div class="sudo-body">Add an IPv4 or IPv6 address to the <code>pfctl</code> block table.</div>
       </div>
-      <input type="text" class="sudo-input manual-ip-input" placeholder="e.g. 1.2.3.4" autocomplete="off" autocapitalize="off" spellcheck="false" />
+      <input type="text" class="sudo-input manual-ip-input" placeholder="e.g. 1.2.3.4" autocomplete="off" />
       <div class="confirm-actions">
         <button class="confirm-btn confirm-cancel">Cancel</button>
         <button class="confirm-btn confirm-kill manual-submit">Continue</button>
@@ -1457,33 +951,25 @@ function blockIPManualAction(overlay, selectMode) {
   document.body.appendChild(dialog);
   const input = dialog.querySelector('.manual-ip-input');
   input.focus();
-
   const close = () => dialog.remove();
   const submit = () => {
     const ip = input.value.trim();
-    if (!looksLikeIP(ip)) {
-      showToast('Invalid IP format', 'error');
-      input.focus();
-      return;
-    }
+    if (!looksLikeIP(ip)) { showToast('Invalid IP format', 'error'); input.focus(); return; }
     close();
     askSudoPassword('Block', ip, async (password) => {
       if (!password) return;
       try {
-        const result = await sendFirewallRequest(`/api/block/${encodeURIComponent(ip)}`, ip, password);
+        const r = await sendFirewallRequest(`/api/block/${encodeURIComponent(ip)}`, ip, password);
         password = '';
-        showToast(result.message, result.success ? 'success' : 'error');
-        if (result.success) {
+        showToast(r.message, r.success ? 'success' : 'error');
+        if (r.success) {
           blockedIPs.add(ip);
-          if (lastData) render(lastData);
-          await renderBlockedListBody(overlay, { selectMode });
+          await fetchBlockedIPs();
+          if (overlay) await renderBlockedListBody(overlay, { selectMode });
         }
-      } catch (err) {
-        showToast('Failed to block IP: ' + err.message, 'error');
-      }
+      } catch (err) { showToast('Failed to block IP: ' + err.message, 'error'); }
     });
   };
-
   dialog.querySelector('.confirm-cancel').addEventListener('click', close);
   dialog.querySelector('.manual-submit').addEventListener('click', submit);
   input.addEventListener('keydown', (e) => {
@@ -1493,61 +979,33 @@ function blockIPManualAction(overlay, selectMode) {
   dialog.addEventListener('click', (e) => { if (e.target === dialog) close(); });
 }
 
-// Prompt for sudo once and run /api/unblock for each selected IP sequentially.
-// - Sequential (not parallel): keeps server-side pfctl timestamp coherent.
-// - try/finally on the password ref so a thrown error can't leave it live.
-// - Short-circuit on sudo-auth failure so one typo doesn't burn N requests.
 function unblockBulkAction(ips, overlay) {
-  // Representative target for the sudo dialog body.
-  const representative = ips.length === 1
-    ? ips[0]
-    : `${ips[0]} + ${ips.length - 1} more`;
+  const representative = ips.length === 1 ? ips[0] : `${ips[0]} + ${ips.length - 1} more`;
   askSudoPassword(`Unblock ${ips.length} IP${ips.length === 1 ? '' : 's'}`, representative, async (password) => {
     if (!password) return;
-    let ok = 0;
-    let fail = 0;
-    let aborted = false;
+    let ok = 0, fail = 0, aborted = false;
     try {
       for (const ip of ips) {
         try {
-          const result = await sendFirewallRequest(
-            `/api/unblock/${encodeURIComponent(ip)}`, ip, password,
-          );
-          if (result.success) {
-            ok += 1;
-            blockedIPs.delete(ip);
-          } else {
+          const r = await sendFirewallRequest(`/api/unblock/${encodeURIComponent(ip)}`, ip, password);
+          if (r.success) { ok += 1; blockedIPs.delete(ip); }
+          else {
             fail += 1;
-            // Abort the batch on sudo-auth failure — retrying with the same
-            // wrong password will just queue more failures.
-            if (typeof result.message === 'string' && /sudo authentication/i.test(result.message)) {
-              aborted = true;
-              break;
-            }
+            if (typeof r.message === 'string' && /sudo authentication/i.test(r.message)) { aborted = true; break; }
           }
-        } catch {
-          fail += 1;
-        }
+        } catch { fail += 1; }
       }
-    } finally {
-      // Defense: overwrite the local closure reference no matter how the
-      // loop exited (success, break, exception).
-      password = '';
-    }
+    } finally { password = ''; }
     const remaining = ips.length - ok - fail;
     const msg = aborted
       ? `Aborted — sudo auth failed. Unblocked ${ok}, skipped ${remaining}.`
-      : fail === 0
-        ? `Unblocked ${ok} IP${ok === 1 ? '' : 's'}`
-        : `Unblocked ${ok}, failed ${fail}`;
+      : fail === 0 ? `Unblocked ${ok} IP${ok === 1 ? '' : 's'}` : `Unblocked ${ok}, failed ${fail}`;
     showToast(msg, fail === 0 && !aborted ? 'success' : 'error');
-    if (lastData) render(lastData);
+    await fetchBlockedIPs();
     await renderBlockedListBody(overlay, { selectMode: false });
   });
 }
 
-// Pair each 'block' event with the next 'unblock' event for the same IP
-// so every row represents one block session (active or closed).
 function buildBlockedRows(history) {
   const byIp = new Map();
   for (const ev of history) {
@@ -1560,33 +1018,17 @@ function buildBlockedRows(history) {
     let pending = null;
     for (const ev of events) {
       if (ev.action === 'block') {
-        // Two consecutive 'block' events with no 'unblock' between them
-        // means the previous session was superseded (e.g. double-block
-        // via manual-add or API reordering). End the prior session at
-        // the *new* block's timestamp so the row reads as "replaced at
-        // <time>" instead of fabricating an unblock time.
-        if (pending) {
-          rows.push({
-            ip,
-            country: pending.country ?? null,
-            blockedAt: pending.at,
-            status: 'superseded',
-            unblockedAt: ev.at,
-          });
-        }
+        if (pending) rows.push({ ip, country: pending.country ?? null, blockedAt: pending.at, status: 'superseded', unblockedAt: ev.at });
         pending = ev;
       } else if (ev.action === 'unblock' && pending) {
         rows.push({ ip, country: pending.country ?? null, blockedAt: pending.at, status: 'unblocked', unblockedAt: ev.at });
         pending = null;
       }
     }
-    if (pending) {
-      rows.push({ ip, country: pending.country ?? null, blockedAt: pending.at, status: 'active' });
-    }
+    if (pending) rows.push({ ip, country: pending.country ?? null, blockedAt: pending.at, status: 'active' });
   }
-  // Active first (users expect current state at the top), then by blockedAt desc.
-  const statusRank = (s) => (s === 'active' ? 0 : 1);
-  rows.sort((a, b) => statusRank(a.status) - statusRank(b.status) || b.blockedAt - a.blockedAt);
+  const rank = (s) => (s === 'active' ? 0 : 1);
+  rows.sort((a, b) => rank(a.status) - rank(b.status) || b.blockedAt - a.blockedAt);
   return rows;
 }
 
@@ -1597,223 +1039,399 @@ function formatTime(ts) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
-function askSudoPassword(action, ip, onSubmit) {
-  const existing = document.getElementById('sudoOverlay');
-  if (existing) existing.remove();
-
-  const overlay = document.createElement('div');
-  overlay.id = 'sudoOverlay';
-  overlay.className = 'confirm-overlay';
-  overlay.innerHTML = `
-    <div class="confirm-dialog sudo-dialog">
-      <div class="confirm-icon">&#9888;</div>
-      <div class="confirm-message">
-        <div class="sudo-title">sudo operation</div>
-        <div class="sudo-body">
-          <strong>${escapeHtml(action)}</strong> runs <code>pfctl</code> as root to modify the firewall.<br>
-          Target IP: <code>${escapeHtml(ip)}</code>
-        </div>
-        <div class="sudo-note">Your password is sent once to the local server and <strong>never stored</strong>.</div>
-      </div>
-      <input type="password" class="sudo-input" placeholder="System password" autocomplete="off" autocapitalize="off" spellcheck="false" />
-      <div class="confirm-actions">
-        <button class="confirm-btn confirm-cancel">Cancel</button>
-        <button class="confirm-btn confirm-kill sudo-submit">Proceed</button>
-      </div>
-    </div>
-  `;
-  document.body.appendChild(overlay);
-  const input = overlay.querySelector('.sudo-input');
-  input.focus();
-
-  const cleanup = (submitted) => {
-    let pwd = submitted ? input.value : '';
-    input.value = '';
-    overlay.remove();
-    return pwd;
-  };
-  const cancel = () => { cleanup(false); };
-  const submit = () => {
-    const pwd = cleanup(true);
-    onSubmit(pwd);
-  };
-
-  overlay.querySelector('.confirm-cancel').addEventListener('click', cancel);
-  overlay.querySelector('.sudo-submit').addEventListener('click', submit);
-  input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') { e.preventDefault(); submit(); }
-    else if (e.key === 'Escape') { e.preventDefault(); cancel(); }
-  });
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) cancel(); });
-}
-
-function showToast(message, type) {
-  const existing = document.querySelector('.toast');
-  if (existing) existing.remove();
-  const toast = document.createElement('div');
-  toast.className = `toast ${type}`;
-  toast.textContent = message;
-  document.body.appendChild(toast);
-  setTimeout(() => toast.remove(), 3000);
-}
-
-// --- Event listeners ---
-[filterIPv6, filterPrivate, filterSystem].forEach(el => {
-  el.addEventListener('change', () => { if (lastData) render(lastData); });
-});
-
-sortSelect.addEventListener('change', () => { if (lastData) render(lastData); });
-expandAllBtn.addEventListener('click', () => expandAll());
-collapseAllBtn.addEventListener('click', () => collapseAll());
-
-let searchTimeout;
-searchInput.addEventListener('input', () => {
-  clearTimeout(searchTimeout);
-  searchTimeout = setTimeout(() => {
-    // Manual search edits clear the pin focus state so the two stay consistent.
-    if (focusedPinLabel && !searchInput.value.includes(focusedPinLabel)) {
-      focusedPinLabel = null;
-    }
-    if (lastData) render(lastData);
-  }, 200);
-});
-
-// --- Refresh orchestration ---
-
-async function refreshAll({ fresh } = { fresh: false }) {
-  await Promise.all([
-    fetchConnections(),
-    fetchHostInfo({ fresh }),
-    fetchBlockedIPs(),
-  ]);
-}
-
-function scheduleRefresh() {
-  if (refreshTimer) {
-    clearInterval(refreshTimer);
-    refreshTimer = null;
-  }
-  if (refreshIntervalMs > 0) {
-    refreshTimer = setInterval(() => { refreshAll({ fresh: false }); }, refreshIntervalMs);
-  }
-}
-
-refreshSelect.addEventListener('change', () => {
-  refreshIntervalMs = parseInt(refreshSelect.value, 10) || 2000;
-  scheduleRefresh();
-});
-
-refreshNowBtn.addEventListener('click', async () => {
-  refreshNowBtn.classList.add('spinning');
-  try {
-    await refreshAll({ fresh: true });
-  } finally {
-    refreshNowBtn.classList.remove('spinning');
-  }
-});
-
-blockedListBtn.addEventListener('click', () => showBlockedListModal());
-
-// List toggle: the process-detail panel is collapsed by default (body has
-// `globe-pinned` class). Pressing the toggle slides the panel in from the
-// left; pressing again collapses it back. The globe canvas is re-sized after
-// the CSS transition settles so it fills whatever width it was just given.
-function setListVisible(show) {
-  const currentlyHidden = document.body.classList.contains('globe-pinned');
-  const nextHidden = show === undefined ? !currentlyHidden : !show;
-  document.body.classList.toggle('globe-pinned', nextHidden);
-  if (!myGlobe) return;
-  const resize = () => {
-    if (!myGlobe) return;
-    myGlobe.width(globeContainer.clientWidth).height(globeContainer.clientHeight);
-  };
-  // Match to the .left-panel CSS transition (260ms): fire once early to
-  // catch the transition start and again at the end for the final width.
-  requestAnimationFrame(resize);
-  setTimeout(resize, 140);
-  setTimeout(resize, 300);
-}
-
-listToggleBtn.addEventListener('click', (e) => {
-  e.stopPropagation();
-  setListVisible();
-});
-
-document.addEventListener('keydown', (e) => {
-  // Esc collapses the list panel back (only if currently open).
-  if (e.key === 'Escape' && !document.body.classList.contains('globe-pinned')) {
-    setListVisible(false);
-  }
-});
-
-function flickerCounter(el) {
-  el.classList.remove('counter-flicker');
-  void el.offsetWidth;
-  el.classList.add('counter-flicker');
-}
-
-/**
- * SSE subscription to live per-connection byte counters.
- *
- * The browser's EventSource handles reconnect automatically, so we don't
- * need back-off logic here. On each `delta` event we merge into the
- * `liveTraffic` Map and patch any matching `<tr>` in place — no full
- * re-render. If the row isn't currently in the DOM (e.g. its process
- * is collapsed / filtered out), the value still lands in `liveTraffic`
- * so the next render picks it up.
- */
+// ---------- SSE: live traffic ----------
 function connectTrafficStream() {
   let es;
-  try {
-    es = new EventSource('/api/traffic-stream');
-  } catch (err) {
-    console.warn('[traffic-stream] EventSource unsupported:', err);
-    return;
-  }
+  try { es = new EventSource('/api/traffic-stream'); }
+  catch (err) { console.warn('[traffic] EventSource unsupported', err); return; }
 
   es.addEventListener('delta', (ev) => {
     let arr;
-    try {
-      arr = JSON.parse(ev.data);
-    } catch {
-      return;
-    }
+    try { arr = JSON.parse(ev.data); } catch { return; }
     if (!Array.isArray(arr)) return;
 
+    let rxBytesPerSec = 0, txBytesPerSec = 0;
     for (const e of arr) {
       if (!e || typeof e.key !== 'string') continue;
+      const prevBytes = liveTraffic.get(e.key);
+      if (prevBytes) {
+        const drx = Math.max(0, e.bytesIn - prevBytes.bytesIn);
+        const dtx = Math.max(0, e.bytesOut - prevBytes.bytesOut);
+        rxBytesPerSec += drx;
+        txBytesPerSec += dtx;
+      }
       liveTraffic.set(e.key, { bytesIn: e.bytesIn | 0, bytesOut: e.bytesOut | 0 });
-      // Attribute-selector escape: keys are ASCII-safe (our trafficKey
-      // output is lowercase hex + digits + `|` + `:` + `.`) but CSS.escape
-      // covers us in any edge case.
-      const sel = `tr[data-traffic-key="${CSS.escape(e.key)}"]`;
+      // Patch the row in place if visible.
+      const sel = `.c[data-traffic-key="${CSS.escape(e.key)}"]`;
       const row = document.querySelector(sel);
       if (!row) continue;
-      const rxEl = row.querySelector('.bytes-rx');
-      const txEl = row.querySelector('.bytes-tx');
-      if (rxEl) {
-        rxEl.textContent = formatBytes(e.bytesIn);
-        rxEl.title = `${e.bytesIn} bytes received`;
-        rxEl.classList.remove('geo-unknown');
-      }
-      if (txEl) {
-        txEl.textContent = formatBytes(e.bytesOut);
-        txEl.title = `${e.bytesOut} bytes sent`;
-        txEl.classList.remove('geo-unknown');
-      }
+      const rxEl = row.querySelector('[data-role="rx"]');
+      const txEl = row.querySelector('[data-role="tx"]');
+      if (rxEl) rxEl.textContent = `↓${formatBytes(e.bytesIn)}`;
+      if (txEl) txEl.textContent = `↑${formatBytes(e.bytesOut)}`;
     }
+    // Push the tick into throughput history. The stream delivers roughly 1/s.
+    pushThroughput(rxBytesPerSec, txBytesPerSec);
   });
 
-  // EventSource reconnects on its own; just log transient errors.
   es.addEventListener('error', () => {
-    // readyState === 0 means EventSource is attempting to reconnect.
-    // Nothing actionable here; keep the liveTraffic cache warm so the UI
-    // doesn't flash back to stale poll values while we're offline.
+    // EventSource reconnects on its own.
   });
 }
 
-// --- Init ---
-initGlobe();
+// ---------- Throughput history / graph ----------
+let rxHistory = Array(40).fill(0), txHistory = Array(40).fill(0);
+function pushThroughput(rxBps, txBps) {
+  rxHistory.push(rxBps); rxHistory.shift();
+  txHistory.push(txBps); txHistory.shift();
+  const toMB = (b) => (b / (1024 * 1024)).toFixed(2);
+  tRx.textContent = toMB(rxBps);
+  tTx.textContent = toMB(txBps);
+  drawGraph(gRx, rxHistory, getComputedStyle(document.body).getPropertyValue('--ice').trim());
+  drawGraph(gTx, txHistory, getComputedStyle(document.body).getPropertyValue('--signal').trim());
+}
+function drawGraph(svg, arr, color) {
+  if (!svg) return;
+  const max = Math.max(...arr, 1);
+  const pts = arr.map((v, i) => `${(i / (arr.length - 1)) * 100},${48 - (v / max) * 44}`);
+  svg.innerHTML = `
+    <polyline points="${pts.join(' ')}" fill="none" stroke="${color}" stroke-width="1.2" />
+    <polygon points="0,48 ${pts.join(' ')} 100,48" fill="${color}" fill-opacity="0.14" />
+  `;
+}
+
+// ---------- Radar canvas ----------
+const radarCanvas = document.getElementById('radar');
+const radarCtx = radarCanvas.getContext('2d');
+let RW = 0, RH = 0, CX = 0, CY = 0, RR = 0;
+const DPR = Math.max(1, window.devicePixelRatio || 1);
+let homeLat = null, homeLon = null;
+let radarTargets = []; // { lat, lng, pt, hot, label, bytes }
+let sweepAngle = -Math.PI / 2;
+let lastT = 0;
+let radarOn = true;
+
+function sizeRadar() {
+  const parent = radarCanvas.parentElement;
+  const rect = parent.getBoundingClientRect();
+  // Round to integer CSS pixels: the canvas has CSS width:100% which
+  // rounds to nearest device pixel on its own. If our internal RW/RH
+  // are sub-pixel, CX/CY drift off-center and targets appear to shift
+  // as the browser rescales each redraw.
+  const w = Math.floor(rect.width);
+  const h = Math.floor(rect.height);
+  if (w === RW && h === RH) return;
+  RW = w; RH = h;
+  const dpr = Math.max(1, window.devicePixelRatio || 1);
+  radarCanvas.width = Math.floor(RW * dpr);
+  radarCanvas.height = Math.floor(RH * dpr);
+  radarCanvas.style.width = RW + 'px';
+  radarCanvas.style.height = RH + 'px';
+  radarCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  CX = Math.round(RW / 2);
+  CY = Math.round(RH / 2);
+  RR = Math.floor(Math.min(RW, RH) / 2) - 40;
+  layoutBearings();
+  reprojectTargets();
+}
+window.addEventListener('resize', sizeRadar);
+// The radar-wrap size changes whenever the queue collapses, a modal
+// opens, the stage rows rebalance (stats strip wraps), or the window
+// resizes. Window resize alone misses all of those, which is what made
+// the canvas resolution go stale and the pinpoints "drift" relative to
+// the drawn rings. A ResizeObserver on the parent catches every case.
+if (typeof ResizeObserver !== 'undefined') {
+  new ResizeObserver(() => sizeRadar()).observe(radarCanvas.parentElement);
+}
+
+function layoutBearings() {
+  const wrap = document.getElementById('bearings');
+  if (!wrap) return;
+  wrap.innerHTML = '';
+  const cardinals = [
+    { l: 'N 000', a: -Math.PI / 2 },
+    { l: 'NE 045', a: -Math.PI / 4 },
+    { l: 'E 090', a: 0 },
+    { l: 'SE 135', a: Math.PI / 4 },
+    { l: 'S 180', a: Math.PI / 2 },
+    { l: 'SW 225', a: 3 * Math.PI / 4 },
+    { l: 'W 270', a: Math.PI },
+    { l: 'NW 315', a: -3 * Math.PI / 4 },
+  ];
+  for (const c of cardinals) {
+    const el = document.createElement('span');
+    el.textContent = c.l;
+    const r = RR + 20;
+    el.style.left = (CX + Math.cos(c.a) * r) + 'px';
+    el.style.top = (CY + Math.sin(c.a) * r) + 'px';
+    wrap.appendChild(el);
+  }
+}
+
+function project(lat, lng) {
+  if (homeLat === null) return { x: CX, y: CY };
+  const φ1 = homeLat * Math.PI / 180;
+  const λ1 = homeLon * Math.PI / 180;
+  const φ2 = lat * Math.PI / 180;
+  const λ2 = lng * Math.PI / 180;
+  const c = Math.acos(Math.max(-1, Math.min(1, Math.sin(φ1) * Math.sin(φ2) + Math.cos(φ1) * Math.cos(φ2) * Math.cos(λ2 - λ1))));
+  const y = Math.sin(λ2 - λ1) * Math.cos(φ2);
+  const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(λ2 - λ1);
+  const θ = Math.atan2(y, x);
+  const rr = (c / Math.PI) * RR * 1.15;
+  return { x: CX + rr * Math.sin(θ), y: CY - rr * Math.cos(θ) };
+}
+
+function reprojectTargets() {
+  for (const t of radarTargets) t.pt = project(t.lat, t.lng);
+}
+
+function radarSetHome(lat, lon) {
+  if (typeof lat !== 'number' || typeof lon !== 'number') return;
+  homeLat = lat; homeLon = lon;
+  reprojectTargets();
+}
+
+function radarUpdateTargets(sortedProcs) {
+  const seen = new Map(); // "lat,lng" -> target
+  for (const p of sortedProcs) {
+    for (const c of p.connections) {
+      const g = c.geo;
+      if (!g || g.country === 'Local' || (!g.lat && !g.lon)) continue;
+      const key = `${g.lat.toFixed(2)},${g.lon.toFixed(2)}`;
+      if (!seen.has(key)) {
+        seen.set(key, {
+          lat: g.lat, lng: g.lon,
+          pt: project(g.lat, g.lng),
+          hot: false,
+          bytes: 0,
+          label: `${g.countryCode || ''} · ${p.processName}`,
+          conns: 0,
+        });
+      }
+      const t = seen.get(key);
+      const tk = clientTrafficKey(c.protocol, c.localAddress, c.localPort, c.remoteAddress, c.remotePort);
+      const live = liveTraffic.get(tk);
+      t.bytes += (live ? live.bytesIn : (c.bytesIn || 0)) + (live ? live.bytesOut : (c.bytesOut || 0));
+      t.conns += 1;
+    }
+  }
+  // mark the top 3 by byte count as hot
+  const arr = [...seen.values()];
+  arr.sort((a, b) => b.bytes - a.bytes);
+  arr.forEach((t, i) => { t.hot = i < 3 && t.bytes > 0; });
+  radarTargets = arr;
+}
+
+function radarFrame(ts) {
+  requestAnimationFrame(radarFrame);
+  if (!radarOn) return;
+  if (!lastT) lastT = ts;
+  const dt = (ts - lastT) / 1000; lastT = ts;
+  sweepAngle += dt * (Math.PI * 2 / 7);
+  if (sweepAngle > Math.PI) sweepAngle -= Math.PI * 2;
+
+  const ctx = radarCtx;
+  ctx.clearRect(0, 0, RW, RH);
+  if (RR <= 0) return;
+
+  // vignette
+  const g = ctx.createRadialGradient(CX, CY, RR * 0.1, CX, CY, RR * 1.1);
+  g.addColorStop(0, 'rgba(255,255,255,0.02)');
+  g.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, RW, RH);
+
+  // rings
+  ctx.strokeStyle = 'oklch(0.32 0.006 260)'; ctx.lineWidth = 1;
+  for (const f of [0.25, 0.5, 0.75, 1.0]) {
+    ctx.beginPath(); ctx.arc(CX, CY, RR * f, 0, Math.PI * 2); ctx.stroke();
+  }
+  ctx.strokeStyle = 'oklch(0.50 0.006 260)';
+  ctx.beginPath(); ctx.arc(CX, CY, RR * 1.08, 0, Math.PI * 2); ctx.stroke();
+
+  // crosshair
+  ctx.strokeStyle = 'oklch(0.25 0.006 260)'; ctx.setLineDash([2, 4]);
+  ctx.beginPath();
+  ctx.moveTo(CX - RR * 1.05, CY); ctx.lineTo(CX + RR * 1.05, CY);
+  ctx.moveTo(CX, CY - RR * 1.05); ctx.lineTo(CX, CY + RR * 1.05);
+  const d = RR * 1.05 / Math.SQRT2;
+  ctx.moveTo(CX - d, CY - d); ctx.lineTo(CX + d, CY + d);
+  ctx.moveTo(CX - d, CY + d); ctx.lineTo(CX + d, CY - d);
+  ctx.stroke(); ctx.setLineDash([]);
+
+  // ticks
+  ctx.strokeStyle = 'oklch(0.35 0.006 260)';
+  for (let a = 0; a < 360; a += 5) {
+    const rad = a * Math.PI / 180;
+    const big = a % 15 === 0;
+    const r1 = RR * 1.08, r2 = RR * (big ? 1.12 : 1.10);
+    ctx.beginPath();
+    ctx.moveTo(CX + Math.cos(rad) * r1, CY + Math.sin(rad) * r1);
+    ctx.lineTo(CX + Math.cos(rad) * r2, CY + Math.sin(rad) * r2);
+    ctx.stroke();
+  }
+
+  // home
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(CX, CY, 3.5, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+  ctx.beginPath(); ctx.arc(CX, CY, 8 + Math.sin(ts / 400) * 2, 0, Math.PI * 2); ctx.stroke();
+
+  // sweep cone + line
+  const signal = 'oklch(0.74 0.25 340)';
+  const grad = ctx.createRadialGradient(CX, CY, 0, CX, CY, RR * 1.08);
+  grad.addColorStop(0, 'rgba(0,0,0,0)');
+  grad.addColorStop(1, 'oklch(0.74 0.25 340 / 0.35)');
+  ctx.save(); ctx.translate(CX, CY); ctx.rotate(sweepAngle);
+  ctx.beginPath(); ctx.moveTo(0, 0);
+  const spread = Math.PI / 5;
+  ctx.arc(0, 0, RR * 1.08, -spread, 0); ctx.closePath();
+  ctx.fillStyle = grad; ctx.fill();
+  ctx.restore();
+
+  ctx.save(); ctx.translate(CX, CY); ctx.rotate(sweepAngle);
+  ctx.strokeStyle = signal; ctx.lineWidth = 1.4; ctx.shadowColor = signal; ctx.shadowBlur = 10;
+  ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(RR * 1.08, 0); ctx.stroke();
+  ctx.shadowBlur = 0; ctx.restore();
+
+  // arcs
+  ctx.strokeStyle = 'oklch(0.84 0.11 230 / 0.18)'; ctx.lineWidth = 0.8;
+  for (const t of radarTargets) {
+    ctx.beginPath();
+    ctx.moveTo(CX, CY);
+    const mx = (CX + t.pt.x) / 2, my = (CY + t.pt.y) / 2;
+    const ndx = -(t.pt.y - CY), ndy = (t.pt.x - CX);
+    const ln = Math.hypot(ndx, ndy) || 1;
+    const k = 0.18;
+    const cx2 = mx + ndx / ln * Math.hypot(t.pt.x - CX, t.pt.y - CY) * k;
+    const cy2 = my + ndy / ln * Math.hypot(t.pt.x - CX, t.pt.y - CY) * k;
+    ctx.quadraticCurveTo(cx2, cy2, t.pt.x, t.pt.y);
+    ctx.stroke();
+  }
+
+  // targets
+  for (const t of radarTargets) {
+    const { x, y } = t.pt;
+    const ang = Math.atan2(y - CY, x - CX);
+    const rel = (sweepAngle - ang + Math.PI * 2) % (Math.PI * 2);
+    const tail = Math.PI / 2.5;
+    const illum = rel < tail ? 1 - rel / tail : 0;
+    const baseAlpha = 0.55 + illum * 0.45;
+    const color = t.hot ? 'oklch(0.74 0.25 340)' : 'oklch(0.84 0.11 230)';
+    ctx.fillStyle = color; ctx.globalAlpha = baseAlpha;
+    ctx.beginPath(); ctx.arc(x, y, t.hot ? 2.8 : 2.2, 0, Math.PI * 2); ctx.fill();
+    if (illum > 0.2) {
+      ctx.globalAlpha = illum * 0.6;
+      ctx.strokeStyle = color; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(x, y, 6 + illum * 6, 0, Math.PI * 2); ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+}
+sizeRadar();
+requestAnimationFrame(radarFrame);
+
+// ---------- System health (live from /api/system-health) ----------
+function fmtBytes(n) {
+  if (n == null) return '—';
+  const gb = n / (1024 ** 3);
+  return gb >= 1 ? gb.toFixed(1) + ' GB' : (n / (1024 ** 2)).toFixed(0) + ' MB';
+}
+async function refreshSystemHealth() {
+  try {
+    const res = await fetch('/api/system-health');
+    if (!res.ok) throw new Error(res.statusText);
+    const h = await res.json();
+    if (h.cpu == null) {
+      hCPU.textContent = '—';
+      hCPUbar.style.width = '0%';
+    } else {
+      hCPU.textContent = h.cpu.toFixed(0) + '%';
+      hCPUbar.style.width = h.cpu.toFixed(0) + '%';
+    }
+    if (h.memUsedBytes == null) {
+      hMem.textContent = `— / ${fmtBytes(h.memTotalBytes)}`;
+      hMembar.style.width = '0%';
+    } else {
+      const pct = (h.memUsedBytes / h.memTotalBytes) * 100;
+      hMem.textContent = `${fmtBytes(h.memUsedBytes)} / ${fmtBytes(h.memTotalBytes)}`;
+      hMembar.style.width = pct.toFixed(0) + '%';
+    }
+    if (h.tempC == null) {
+      hTemp.textContent = '—';
+      hTempbar.style.width = '0%';
+    } else {
+      hTemp.textContent = h.tempC.toFixed(0) + ' °C';
+      hTempbar.style.width = Math.min(100, h.tempC).toFixed(0) + '%';
+    }
+    const [l1, l5, l15] = h.load;
+    hLoad.textContent = `${l1.toFixed(2)} / ${l5.toFixed(2)} / ${l15.toFixed(2)}`;
+  } catch {
+    // leave previous values in place on transient failure
+  }
+}
+refreshSystemHealth();
+setInterval(() => {
+  // Skip polling while the tab is hidden — browsers already throttle
+  // background timers, but skipping outright avoids piling up two
+  // coincident pollers (this one + the connections poll) on focus.
+  if (document.visibilityState !== 'visible') return;
+  refreshSystemHealth();
+}, 2200);
+
+// ---------- Tweaks ----------
+const TWEAKS = JSON.parse(localStorage.getItem('nw-tweaks') || 'null') || { density: 'compact', radar: true };
+function applyTweaks() {
+  document.body.classList.toggle('density-compact', TWEAKS.density === 'compact');
+  document.body.classList.toggle('density-comfortable', TWEAKS.density === 'comfortable');
+  document.body.classList.toggle('radar-off', !TWEAKS.radar);
+  radarOn = TWEAKS.radar !== false;
+  for (const seg of document.querySelectorAll('.tweaks .seg')) {
+    const k = seg.dataset.key;
+    for (const b of seg.querySelectorAll('button')) b.classList.toggle('on', b.dataset.v === TWEAKS[k]);
+  }
+  document.getElementById('twRadar').classList.toggle('on', !!TWEAKS.radar);
+  localStorage.setItem('nw-tweaks', JSON.stringify(TWEAKS));
+}
+document.querySelectorAll('.tweaks .seg').forEach(seg => {
+  seg.addEventListener('click', (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    TWEAKS[seg.dataset.key] = b.dataset.v;
+    applyTweaks();
+  });
+});
+document.getElementById('twRadar').addEventListener('click', () => {
+  TWEAKS.radar = !TWEAKS.radar;
+  applyTweaks();
+});
+applyTweaks();
+
+// ---------- Refresh orchestration ----------
+async function refreshAll({ fresh } = { fresh: false }) {
+  await Promise.all([fetchConnections(), fetchHostInfo({ fresh }), fetchBlockedIPs()]);
+}
+function scheduleRefresh() {
+  if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+  if (refreshIntervalMs > 0) refreshTimer = setInterval(() => refreshAll({ fresh: false }), refreshIntervalMs);
+}
+refreshSelect.addEventListener('change', () => {
+  refreshIntervalMs = parseInt(refreshSelect.value, 10) || 2000;
+  footRefresh.textContent = refreshSelect.options[refreshSelect.selectedIndex].textContent;
+  scheduleRefresh();
+});
+refreshNowBtn.addEventListener('click', async () => {
+  refreshNowBtn.classList.add('spinning');
+  try { await refreshAll({ fresh: true }); }
+  finally { refreshNowBtn.classList.remove('spinning'); }
+});
+
+// Initial foot text sync
+footRefresh.textContent = refreshSelect.options[refreshSelect.selectedIndex].textContent;
+footSort.textContent = sortSelect.value;
+
+// ---------- Init ----------
+statusText.classList.add('wait');
+statusText.textContent = 'connecting…';
 connectTrafficStream();
 refreshAll({ fresh: true });
 scheduleRefresh();
