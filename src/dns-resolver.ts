@@ -46,17 +46,14 @@ export async function reverseLookupBatch(ips: string[]): Promise<Map<string, str
   const results = new Map<string, string>();
   const unique = [...new Set(ips)];
 
-  const settled = await Promise.allSettled(
+  // `reverseLookup` never throws — it returns '-' on failure — so this is
+  // effectively Promise.all, but `allSettled` keeps us robust if that ever
+  // changes. No post-fill pass needed.
+  await Promise.allSettled(
     unique.map(async (ip) => {
-      const domain = await reverseLookup(ip);
-      results.set(ip, domain);
+      results.set(ip, await reverseLookup(ip));
     })
   );
-
-  // Fill any that failed
-  for (const ip of unique) {
-    if (!results.has(ip)) results.set(ip, '-');
-  }
 
   return results;
 }
