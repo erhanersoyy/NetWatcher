@@ -16,7 +16,20 @@ import type { ProcessInfo, EnrichedConnection, HostInfo } from './types.js';
 
 export const router: ReturnType<typeof Router> = Router();
 
-router.get('/api/connections', async (_req, res) => {
+/**
+ * Coalesce concurrent `/api/connections` calls. `lsof` is the fixed-cost
+ * hot path (100–500 ms on loaded boxes) and nothing stops two polls from
+ * racing — the UI auto-refresh + a manual "refresh now" click will happily
+ * spawn two lsof children in parallel. A short in-flight promise window
+ * means the second caller attaches to the first request's result.
+ *
+ * 800 ms is well below the default 2 s UI poll and still short enough
+ * that a manual refresh after a state change (kill/block) sees fresh data.
+ */
+const CONN_COALESCE_WINDOW_MS = 800;
+let connInFlight: { promise: Promise<ProcessInfo[]>; startedAt: number } | null = null;
+
+async function buildConnectionsPayload(): Promise<ProcessInfo[]> {
   const connections = await getConnections();
 
   // Collect unique remote IPs for batch geolocation + reverse DNS
@@ -72,13 +85,31 @@ router.get('/api/connections', async (_req, res) => {
       domain: dnsMap.get(conn.remoteAddress) ?? '-',
       bytesIn: stats?.bytesIn,
       bytesOut: stats?.bytesOut,
+      trafficKey: key,
     };
     proc.connections.push(enriched);
   }
 
   // No server-side sort — client controls sort order
-  const result = [...processMap.values()];
-  res.json(result);
+  return [...processMap.values()];
+}
+
+router.get('/api/connections', async (_req, res) => {
+  const now = Date.now();
+  if (!connInFlight || now - connInFlight.startedAt > CONN_COALESCE_WINDOW_MS) {
+    const promise = buildConnectionsPayload().finally(() => {
+      // Clear only if this entry is still the current one — a later poll
+      // may have already replaced it, and we don't want to null that out.
+      if (connInFlight && connInFlight.promise === promise) connInFlight = null;
+    });
+    connInFlight = { promise, startedAt: now };
+  }
+  try {
+    const result = await connInFlight.promise;
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ success: false, message: (err as Error).message });
+  }
 });
 
 router.post('/api/kill/:pid', async (req, res) => {

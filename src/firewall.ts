@@ -148,13 +148,18 @@ export async function blockIP(ip: string, password: string): Promise<{ success: 
     }
 
     // Record metadata out-of-band — pfctl's table has no notion of timestamps/country.
-    try {
-      const geo = await lookupSingleIP(ip);
-      await recordBlock(ip, geo?.country ?? null);
-    } catch {
-      // If geo or store fails, the pf rule is already in place; don't fail the user action.
-      await recordBlock(ip, null).catch(() => {});
-    }
+    // The pf rule is already in place; don't block the response on geo lookup
+    // (ip-api.com can take >1s) or on the SQLite write. Fire-and-forget, update
+    // the country field later if geo resolves. If nothing resolves, we still
+    // have a timestamped `recordBlock(ip, null)` attempt.
+    void (async () => {
+      try {
+        const geo = await lookupSingleIP(ip);
+        await recordBlock(ip, geo?.country ?? null);
+      } catch {
+        await recordBlock(ip, null).catch(() => {});
+      }
+    })();
     return { success: true, message: `Blocked ${ip}` };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

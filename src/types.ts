@@ -36,6 +36,12 @@ export interface EnrichedConnection {
   domain: string;
   bytesIn?: number;
   bytesOut?: number;
+  /**
+   * Server-computed traffic-stream key — matches the SSE delta key so the
+   * frontend can look up live bytes without recomputing the key per-conn
+   * per-render. Keeps the canonical IP-normalization logic in one place.
+   */
+  trafficKey: string;
 }
 
 export interface ProcessInfo {
