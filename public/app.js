@@ -78,10 +78,13 @@ let blockedQ = '';
 const CSRF_HEADER = { 'x-requested-by': 'netwatcher' };
 
 // ---------- Helpers ----------
+const HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 function escapeHtml(str) {
-  const div = document.createElement('div');
-  div.textContent = str ?? '';
-  return div.innerHTML;
+  // Regex replace is ~10× faster than creating a <div> per call. Only
+  // matters in hot render paths (renderConnBlock runs for every visible
+  // conn × 6–8 escapeHtml calls per render).
+  if (str === null || str === undefined) return '';
+  return String(str).replace(/[&<>"']/g, (c) => HTML_ESCAPES[c]);
 }
 function isIPv6(addr) { return typeof addr === 'string' && addr.includes(':'); }
 function isLocalhost(addr) { return addr === '127.0.0.1' || addr === '::1' || (typeof addr === 'string' && addr.startsWith('127.')); }
@@ -117,16 +120,10 @@ function formatBytes(n) {
   while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
   return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
 }
-function clientTrafficKey(protocol, localIP, localPort, remoteIP, remotePort) {
-  const normalize = (ip) => {
-    let out = String(ip).replace(/%.+$/, '');
-    out = out.replace(/^fe80:[0-9a-f]{1,4}::/i, 'fe80::');
-    return out.toLowerCase();
-  };
-  const p = String(protocol).toLowerCase();
-  const proto = p.startsWith('tcp') ? 'tcp' : p.startsWith('udp') ? 'udp' : p;
-  return `${proto}|${normalize(localIP)}|${localPort}|${normalize(remoteIP)}|${remotePort}`;
-}
+// The server now stamps each EnrichedConnection with its canonical `trafficKey`
+// (matches SSE delta keys exactly). We used to recompute the key client-side
+// for every conn × every render; deleted. `conn.trafficKey` is always present
+// from `/api/connections`.
 
 // ---------- Sort / filter ----------
 function sortProcesses(processes) {
@@ -164,8 +161,7 @@ function procSummary(proc) {
   for (const c of proc.connections) {
     const cc = c.geo?.countryCode;
     if (cc) countries.set(cc, (countries.get(cc) || 0) + 1);
-    const tk = clientTrafficKey(c.protocol, c.localAddress, c.localPort, c.remoteAddress, c.remotePort);
-    const live = liveTraffic.get(tk);
+    const live = liveTraffic.get(c.trafficKey);
     totalBytes += (live ? live.bytesIn : (c.bytesIn || 0));
     totalBytes += (live ? live.bytesOut : (c.bytesOut || 0));
   }
@@ -179,10 +175,12 @@ function procSummary(proc) {
 }
 
 // ---------- Render ----------
-function updateExpandToggle() {
+function updateExpandToggle(visible) {
   const btn = document.getElementById('expandToggleChip');
   if (!btn || !lastData) return;
-  const visible = applyFilters(lastData);
+  // `visible` is passed in by `renderQueue` to avoid a second applyFilters
+  // pass. Chip-click path computes its own (rare, on user interaction).
+  if (!visible) visible = applyFilters(lastData);
   const allOpen = visible.length > 0 && visible.every((p) => expandedPids.has(p.pid));
   btn.classList.toggle('all-expanded', allOpen);
   const lbl = btn.querySelector('.lbl');
@@ -190,16 +188,52 @@ function updateExpandToggle() {
   btn.title = allOpen ? 'Collapse all' : 'Expand all';
 }
 
-function renderQueue() {
+// Signature over the inputs that renderQueue actually reads. Guards against
+// the wholesale `innerHTML` rewrite when nothing visible has changed (e.g.
+// poll returned identical data, no filter/sort/expand state changed). SSE
+// delta patching still updates bytes in place under this guard.
+let lastRenderSig = '';
+function computeRenderSig() {
+  if (!lastData) return '';
+  const sort = sortSelect.value;
+  const exp = [...expandedPids].sort((a, b) => a - b).join(',');
+  const filt = `${filter.sys ? 1 : 0}${filter.v6 ? 1 : 0}${filter.priv ? 1 : 0}|${filter.q}`;
+  // Include the full sorted blocked-IP list: per-row "BLOCKED" tag and
+  // Block/Unblock button depend on membership, not just set size, so a
+  // swap of one IP for another at the same size must invalidate the sig.
+  const blocked = [...blockedIPs].sort().join(',');
+  // Data fingerprint: PID + conn count + remote IPs + states. Byte counts
+  // are deliberately excluded — they churn every poll but SSE patches them
+  // in place; re-rendering the whole list just to refresh bytes is exactly
+  // the waste we're trying to skip.
+  const dataParts = [];
+  for (const p of lastData) {
+    dataParts.push(`${p.pid}:${p.connections.length}`);
+    for (const c of p.connections) {
+      dataParts.push(`${c.remoteAddress}:${c.remotePort}:${c.state}`);
+    }
+  }
+  return `${sort}|${exp}|${filt}|${blocked}|${dataParts.join(';')}`;
+}
+
+function renderQueue(force = false) {
   if (!lastData) {
     queueEl.innerHTML = '<div class="queue-empty">Loading connections…</div>';
+    lastRenderSig = '';
     return;
+  }
+  if (!force) {
+    const sig = computeRenderSig();
+    if (sig === lastRenderSig) return;
+    lastRenderSig = sig;
+  } else {
+    lastRenderSig = computeRenderSig();
   }
   const filtered = applyFilters(lastData);
   const sorted = sortProcesses(filtered);
 
   procCountEl.textContent = `${sorted.length} visible`;
-  updateExpandToggle();
+  updateExpandToggle(sorted);
 
   if (sorted.length === 0) {
     queueEl.innerHTML = '<div class="queue-empty">No connections match current filters</div>';
@@ -280,7 +314,7 @@ function renderConnBlock(proc) {
       ? `<span class="dom">${escapeHtml(conn.domain)}</span>`
       : '';
 
-    const tKey = clientTrafficKey(conn.protocol, conn.localAddress, conn.localPort, conn.remoteAddress, conn.remotePort);
+    const tKey = conn.trafficKey;
     const live = liveTraffic.get(tKey);
     const rx = live ? live.bytesIn : conn.bytesIn;
     const tx = live ? live.bytesOut : conn.bytesOut;
@@ -323,8 +357,7 @@ function renderTopTalkers(sorted) {
     for (const c of p.connections) {
       if (!c.geo) continue;
       const key = c.geo.country || c.geo.countryCode || '?';
-      const tk = clientTrafficKey(c.protocol, c.localAddress, c.localPort, c.remoteAddress, c.remotePort);
-      const live = liveTraffic.get(tk);
+      const live = liveTraffic.get(c.trafficKey);
       const b = (live ? live.bytesIn : (c.bytesIn || 0)) + (live ? live.bytesOut : (c.bytesOut || 0));
       byCountry.set(key, (byCountry.get(key) || 0) + b);
     }
@@ -1110,6 +1143,24 @@ let radarTargets = []; // { lat, lng, pt, hot, label, bytes }
 let sweepAngle = -Math.PI / 2;
 let lastT = 0;
 let radarOn = true;
+// Pause the rAF loop when the radar isn't visible — tab hidden, scrolled
+// out of view, or container display:none. requestAnimationFrame is already
+// throttled to 1Hz when the tab is hidden, but the per-frame redraw
+// (rings, 72 ticks, home, sweep, arcs, targets) is still wasted work.
+let radarVisible = true;
+let radarTabVisible = !document.hidden;
+let radarRafScheduled = false;
+function radarShouldRun() { return radarOn && radarVisible && radarTabVisible; }
+function scheduleRadarFrame() {
+  if (radarRafScheduled || !radarShouldRun()) return;
+  radarRafScheduled = true;
+  requestAnimationFrame(radarFrame);
+}
+document.addEventListener('visibilitychange', () => {
+  radarTabVisible = !document.hidden;
+  lastT = 0; // avoid a huge dt jump on resume
+  scheduleRadarFrame();
+});
 
 function sizeRadar() {
   const parent = radarCanvas.parentElement;
@@ -1210,8 +1261,7 @@ function radarUpdateTargets(sortedProcs) {
         });
       }
       const t = seen.get(key);
-      const tk = clientTrafficKey(c.protocol, c.localAddress, c.localPort, c.remoteAddress, c.remotePort);
-      const live = liveTraffic.get(tk);
+      const live = liveTraffic.get(c.trafficKey);
       t.bytes += (live ? live.bytesIn : (c.bytesIn || 0)) + (live ? live.bytesOut : (c.bytesOut || 0));
       t.conns += 1;
     }
@@ -1224,8 +1274,10 @@ function radarUpdateTargets(sortedProcs) {
 }
 
 function radarFrame(ts) {
+  radarRafScheduled = false;
+  if (!radarShouldRun()) return; // stop the loop; scheduleRadarFrame() resumes it
   requestAnimationFrame(radarFrame);
-  if (!radarOn) return;
+  radarRafScheduled = true;
   if (!lastT) lastT = ts;
   const dt = (ts - lastT) / 1000; lastT = ts;
   sweepAngle += dt * (Math.PI * 2 / 7);
@@ -1329,7 +1381,24 @@ function radarFrame(ts) {
   }
 }
 sizeRadar();
-requestAnimationFrame(radarFrame);
+scheduleRadarFrame();
+
+// Watch whether the radar is actually on-screen (tweaks can hide it via
+// `display:none`, the queue can push it below the fold, etc.). Combined
+// with the visibilitychange listener, this means the canvas redraws only
+// when pixels on screen actually depend on it.
+if (typeof IntersectionObserver !== 'undefined') {
+  const io = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      radarVisible = e.isIntersecting;
+      if (radarVisible) {
+        lastT = 0;
+        scheduleRadarFrame();
+      }
+    }
+  }, { threshold: 0 });
+  io.observe(radarCanvas);
+}
 
 // ---------- System health (live from /api/system-health) ----------
 function fmtBytes(n) {
@@ -1386,6 +1455,7 @@ function applyTweaks() {
   document.body.classList.toggle('density-comfortable', TWEAKS.density === 'comfortable');
   document.body.classList.toggle('radar-off', !TWEAKS.radar);
   radarOn = TWEAKS.radar !== false;
+  if (radarOn) { lastT = 0; scheduleRadarFrame(); }
   for (const seg of document.querySelectorAll('.tweaks .seg')) {
     const k = seg.dataset.key;
     for (const b of seg.querySelectorAll('button')) b.classList.toggle('on', b.dataset.v === TWEAKS[k]);
