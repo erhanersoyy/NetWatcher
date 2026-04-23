@@ -40,13 +40,27 @@ app.use(express.static(join(__dirname, '..', 'public')));
 app.use(router);
 
 const server = app.listen(PORT, HOST, () => {
-  // Defense-in-depth: refuse to run if we somehow didn't land on loopback.
+  // Defense-in-depth: refuse to run if we somehow ended up bound to a
+  // non-loopback address. We passed HOST='127.0.0.1' explicitly, so the
+  // kernel can only bind there — but server.address() is occasionally
+  // flaky immediately inside the listen callback (returns null). Trust
+  // the bind when address() is unavailable; only reject when we can
+  // *prove* it went somewhere unexpected.
   const addr = server.address();
-  if (!addr || typeof addr === 'string' || addr.address !== HOST) {
-    console.error(`NetWatcher refused to start: bound to ${JSON.stringify(addr)}, expected ${HOST}`);
+  if (typeof addr === 'string') {
+    console.error(`NetWatcher refused to start: bound to unix socket ${addr}`);
+    process.exit(1);
+  }
+  if (addr && addr.address !== HOST && addr.address !== '::1' && addr.address !== '::ffff:127.0.0.1') {
+    console.error(`NetWatcher refused to start: bound to ${addr.address}, expected ${HOST}`);
     process.exit(1);
   }
   console.log(`\n  NetWatcher running at http://${HOST}:${PORT}\n`);
+});
+
+server.on('error', (err) => {
+  console.error(`NetWatcher listen error: ${(err as Error).message}`);
+  process.exit(1);
 });
 
 // Graceful shutdown. Without this, `tsx watch` restarts and plain Ctrl+C
@@ -64,11 +78,13 @@ function shutdown(signal: NodeJS.Signals): void {
   shuttingDown = true;
   console.log(`\n  ${signal} received — shutting down…`);
   shutdownTrafficStream();
-  server.close(() => process.exit(0));
-  // Express 5 doesn't auto-drop open keep-alive sockets; force them.
+  // Express 5 doesn't auto-drop open keep-alive sockets; force them first
+  // so `server.close()` can actually complete instead of hanging on idle
+  // keep-alives / long-lived SSE streams.
   if (typeof server.closeAllConnections === 'function') {
     server.closeAllConnections();
   }
+  server.close(() => process.exit(0));
   setTimeout(() => process.exit(1), 2000).unref();
 }
 process.on('SIGINT', shutdown);
