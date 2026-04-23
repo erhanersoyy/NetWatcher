@@ -1,18 +1,20 @@
 # NetWatcher
 
-A local network-connection dashboard for macOS. Lists every outbound connection on your machine grouped by process, enriched with geo / reverse DNS / process metadata, plotted on a 3D globe. Kill processes and block remote IPs via `pfctl` from the browser.
+A local network-connection dashboard for macOS. Lists every outbound connection on your machine grouped by process, enriched with geo / reverse DNS / process metadata, and plotted on a 2D radar. Kill processes and block remote IPs via `pfctl` straight from the browser.
 
 ![macOS](https://img.shields.io/badge/platform-macOS-lightgrey)
 ![node](https://img.shields.io/badge/node-%3E%3D20-green)
 
-Everything runs on `127.0.0.1:3847` with `Host`.
+Everything runs on `127.0.0.1:3847`.
 
 ## Contents
 
 - [Features](#features)
 - [Install & run](#install--run)
+- [UI layout](#ui-layout)
 - [Block / Unblock setup](#block--unblock-setup)
 - [Architecture](#architecture)
+- [REST API](#rest-api)
 - [Security posture](#security-posture)
 - [External services](#external-services)
 - [macOS pf notes](#macos-pf-notes)
@@ -21,14 +23,17 @@ Everything runs on `127.0.0.1:3847` with `Host`.
 
 ## Features
 
-- **Live connection list** — `lsof` snapshot, grouped by PID, configurable refresh (Live 2s / 10s / 30s / 1m / 5m / 10m + manual; defaults to 5m, sorted by PID). Default filters exclude IPv6, private IPs, and system processes.
-- **Per-connection RX / TX bytes** — byte counts from `nettop`, merged into each connection row.
-- **Geo + reverse DNS** — batched against ip-api.com, cached in memory.
-- **3D globe** — neon-themed, with country borders, pulse-animated pins keyed to live traffic, and arcs that dim siblings on hover. A top-talkers panel surfaces the busiest countries. The globe is full-width by default; a toggle in the host-info bar slides the process-detail panel in from the left.
-- **Kill process** — uid-verified `SIGTERM`.
-- **Block / unblock IP** — `pfctl` anchor + table; per-request sudo password (never stored).
-- **Blocked IPs history** — persisted to `data/blocks.json` (gitignored), modal shows IP / country / blocked-at / status.
-- **VirusTotal lookup** — optional, via the `vt` CLI.
+- **Live connection list.** `lsof` snapshot, grouped by PID, configurable refresh (2s / 10s / 30s / 1m / 5m / 10m + manual; default 5m). Default filters exclude IPv6, private IPs, and system processes.
+- **Per-connection RX / TX bytes.** A long-running `nettop` child streams byte counts to the server; the server pushes deltas to the browser over SSE (`/api/traffic-stream`). Each connection row shows live RX / TX, and the top throughput panel aggregates download / upload.
+- **Geo + reverse DNS.** Batched against ip-api.com, cached in memory (24h geo, 30min DNS).
+- **2D radar.** Azimuthal-equidistant projection centered on your location, with a rotating sweep, range rings, and a pin per remote country. Top 3 by traffic burn hot (pink); rest are cool (ice). Sizes itself to its container via `ResizeObserver` — no drift when the layout changes.
+- **Host info.** Masthead shows hostname / local IP / public IP / geo / ISP; the left panel repeats ISP + geo as a compact always-visible strip above the process list.
+- **System health.** Live CPU / memory / temp / load readout from `src/system-health.ts`, polled from `/api/system-health`.
+- **Kill process.** uid-verified `SIGTERM`, with a confirmation dialog on system processes.
+- **Block / unblock IP.** `pfctl` anchor + table; per-request sudo password (never stored).
+- **Blocked IPs panel + history.** The sidebar panel lists current blocks with filter / export / manual add. The history modal (`History…`) shows all past block sessions with country, hostname, reason, duration, and bulk unblock / reblock / remove actions. Persisted to `data/blocks.json` (gitignored).
+- **VirusTotal lookup.** Optional, via the `vt` CLI. Modal shows stat lines (malicious / suspicious / harmless), country, ASN.
+- **Graceful shutdown.** `SIGINT` / `SIGTERM` stops the traffic sampler, drains HTTP connections, force-closes keep-alives, and releases port 3847.
 
 ## Install & run
 
@@ -43,6 +48,31 @@ pnpm start        # run compiled build
 pnpm typecheck    # tsc --noEmit
 ```
 
+`pnpm dev` runs a `predev` step that frees port 3847 first — if a previous `tsx watch` (or zombie child) is still holding it, the PIDs are printed and SIGTERM'd so the new run binds cleanly.
+
+## UI layout
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  NetWatcher   Host | Local | Public | Geo | ISP       12:04:37 · state │  ← masthead
+├─────────────────────────┬───────────────────────────────────────────────┤
+│ Process list   (n)      │                                               │
+│ ISP       | Geo          │            ┌───── radar ─────┐                │
+│ [sort][refresh][↻]      │            │   N   NE   E   │                │
+│ [search /]              │            │  sweep + pins   │                │
+│ [hide sys][no ipv6]…    │            └─────────────────┘                │
+│                          ├───────────────────────────────────────────────┤
+│ ▸ chrome   (45)          │   ↓ Download  2.11 MB/s   │  ↑ Upload  0.04  │
+│ ▸ slack    (12)          ├───────────────────────────────────────────────┤
+│   ▸ 151.101.1.69 :443    │   Processes · Connections · Countries         │
+│ …                        ├───────────────────────────────────────────────┤
+│                          │   Blocked IPs  (n)  [filter][export][+add]    │
+│                          │   1.2.3.4  TR  evil.example  2m ago  [un]     │
+└─────────────────────────┴───────────────────────────────────────────────┘
+```
+
+Press `T` for tweaks (density, radar on/off), `/` to focus the search.
+
 ## Block / Unblock setup
 
 Block / Unblock shells out to `sudo /sbin/pfctl`. The UI shows a sudo dialog on every Block / Unblock; the password is sent once to the local server, piped to `sudo -S` over stdin, and never written anywhere. No `NOPASSWD` / sudoers configuration is used or supported.
@@ -51,27 +81,50 @@ Block / Unblock shells out to `sudo /sbin/pfctl`. The UI shows a sudo dialog on 
 
 ```
 src/
-├── index.ts          # Express + Host/Origin/CSRF middleware
-├── routes.ts         # REST API
-├── connections.ts    # lsof -F parser
-├── geolocation.ts    # ip-api.com batch + 24h cache
-├── dns-resolver.ts   # reverse DNS + 30min cache
-├── process-info.ts   # static process metadata (~160 entries)
-├── process-kill.ts   # uid-verified SIGTERM
-├── firewall.ts       # pfctl anchor / table mgmt
-├── block-store.ts    # data/blocks.json atomic store
-└── virustotal.ts     # `vt ip` wrapper
+├── index.ts            # Express + Host/Origin/CSRF middleware + graceful shutdown
+├── routes.ts           # REST API + SSE stream
+├── connections.ts      # lsof -F parser
+├── traffic.ts          # one-shot nettop byte snapshot
+├── traffic-stream.ts   # long-running nettop child + SSE subscriber mgmt
+├── geolocation.ts      # ip-api.com batch + 24h cache
+├── dns-resolver.ts     # reverse DNS + 30min cache
+├── system-health.ts    # CPU / mem / temp / load via sysctl / vm_stat
+├── process-info.ts     # static process metadata (~160 entries)
+├── process-kill.ts     # uid-verified SIGTERM
+├── firewall.ts         # pfctl anchor / table mgmt
+├── block-store.ts      # data/blocks.json atomic store
+├── virustotal.ts       # `vt ip` wrapper
+└── types.ts
 
 public/
-├── index.html        # no build step
-├── app.js
+├── index.html          # no build step
+├── app.js              # vanilla JS, SSE client, canvas radar
 └── style.css
 ```
 
+## REST API
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET`  | `/api/connections`         | Grouped connections with geo / DNS / traffic enrichment |
+| `GET`  | `/api/traffic-stream`      | SSE; `event: delta` with per-connection RX/TX every ~1s |
+| `GET`  | `/api/host-info`           | Hostname + local / public IP + geo (5m cache) |
+| `GET`  | `/api/system-health`       | CPU / mem / temp / load |
+| `POST` | `/api/kill/:pid`           | uid-verified SIGTERM |
+| `GET`  | `/api/vt/:ip`              | VirusTotal lookup (via local `vt` CLI) |
+| `POST` | `/api/block/:ip`           | Add IP to pf table (+ kill states) |
+| `POST` | `/api/unblock/:ip`         | Remove IP from pf table |
+| `GET`  | `/api/blocked`             | Currently-blocked IPs |
+| `GET`  | `/api/block-history`       | Full block history with session rows |
+| `DELETE` | `/api/block-history/:ip` | Remove one history row (`blockedAt` query param required) |
+
+All state-changing calls require `x-requested-by: netwatcher`. Block / unblock calls also accept a one-time sudo password in the JSON body.
+
 ## Security posture
 
-- Bound to `127.0.0.1` only; aborts if the listener lands elsewhere.
-- `/api` middleware: `Host` allowlist (DNS rebinding), `Origin` allowlist when present, `x-requested-by: netwatcher` header on state changes.
+- Bound to `127.0.0.1` only; aborts if the listener ever lands elsewhere.
+- `/api` middleware: `Host` allowlist (defeats DNS rebinding), `Origin` allowlist when present, `x-requested-by: netwatcher` header on state changes.
+- SSE endpoint is GET-only and read-only — the `Host` / `Origin` gate still applies, but the CSRF header is skipped because `EventSource` can't set custom headers.
 - All shell calls use argv-form `execFile` / `spawn` — no `sh -c`. IPs go through `net.isIP()`; loopback / unspecified rejected.
 - PID ownership compared by numeric uid (avoids `ps` username truncation).
 - Frontend escapes every server-supplied string before `innerHTML`.
@@ -83,8 +136,9 @@ public/
 | --- | --- | --- |
 | ip-api.com | Batch geo lookup | Free, 45 req/min, no key |
 | api.ipify.org | Public IP | Free, no key |
-| unpkg / jsdelivr | globe.gl + Three.js CDN | Browser-loaded |
 | VirusTotal *(optional)* | IP reputation via `vt` CLI | Your own key (`vt init`) |
+
+No frontend CDN. `public/` loads only its own `app.js` / `style.css` + Google Fonts (Manrope, JetBrains Mono).
 
 ## macOS pf notes
 
@@ -113,9 +167,9 @@ References: [PF on Mac OS X](https://manjusri.ucsc.edu/2015/03/10/PF-on-Mac-OS-X
 
 ## Limitations
 
-- macOS only — `lsof` and `pfctl` dependent.
+- macOS only — `lsof`, `nettop`, and `pfctl` dependent.
 - `lsof` without sudo sees only your user's sockets (intentional).
-- Per-process attribution; not per-tab/URL.
+- Per-process attribution; not per-tab / URL.
 - `process-info.ts` is a hand-maintained list of ~160 common macOS processes.
 - **UDP unconnected sockets are intentionally not shown** — `lsof` reports them as `UDP *:port` with no remote, so there's nothing to geo-locate or block. For per-process byte-level visibility (what Activity Monitor's Network tab uses), see `nettop -P -t external`.
 
