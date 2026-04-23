@@ -11,6 +11,7 @@ import { killProcess } from './process-kill.js';
 import { vtLookup } from './virustotal.js';
 import { blockIP, unblockIP, getBlockedIPs } from './firewall.js';
 import { getBlockHistory, deleteBlockHistoryRow } from './block-store.js';
+import { getSystemHealth } from './system-health.js';
 import type { ProcessInfo, EnrichedConnection, HostInfo } from './types.js';
 
 export const router: ReturnType<typeof Router> = Router();
@@ -143,6 +144,15 @@ router.get('/api/traffic-stream', (req, res) => {
   };
   req.on('close', cleanup);
   req.on('error', cleanup);
+});
+
+router.get('/api/system-health', async (_req, res) => {
+  try {
+    const health = await getSystemHealth();
+    res.json(health);
+  } catch (err) {
+    res.status(500).json({ success: false, message: (err as Error).message });
+  }
 });
 
 router.get('/api/blocked', async (_req, res) => {
