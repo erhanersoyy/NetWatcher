@@ -764,11 +764,10 @@ function showConfirmDialog(message, onConfirm) {
   `;
   document.body.appendChild(overlay);
   const release = trapFocus(overlay);
-  const close = () => { release(); overlay.remove(); };
-  overlay.querySelector('.confirm-kill').focus(); // sensible initial focus
-  document.addEventListener('keydown', function esc(e) {
-    if (e.key === 'Escape') { e.preventDefault(); close(); document.removeEventListener('keydown', esc); }
-  });
+  const close = () => { document.removeEventListener('keydown', onEsc); release(); overlay.remove(); };
+  function onEsc(e) { if (e.key === 'Escape') { e.preventDefault(); close(); } }
+  document.addEventListener('keydown', onEsc);
+  overlay.querySelector('.confirm-cancel').focus(); // safe default focus (avoid the destructive action)
   overlay.querySelector('.confirm-cancel').addEventListener('click', close);
   overlay.querySelector('.confirm-kill').addEventListener('click', () => { close(); onConfirm(); });
   overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
