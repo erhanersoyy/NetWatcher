@@ -416,7 +416,11 @@ queueEl.addEventListener('keydown', (e) => {
   const row = e.target.closest?.('.row[data-action="toggle"]');
   if (!row) return;
   e.preventDefault();            // Space must not scroll the page
-  row.click();                   // reuse the existing click→toggle path
+  const pid = row.dataset.pid;
+  row.click();                   // toggles + synchronously re-renders the list
+  // renderQueue() rebuilt the list and destroyed the focused row — restore
+  // focus to the same process row so keyboard navigation keeps its place.
+  queueEl.querySelector(`.row[data-pid="${CSS.escape(pid)}"]`)?.focus();
 });
 
 // ---------- Search / sort / chips ----------
@@ -531,14 +535,15 @@ async function fetchConnections() {
 
 // ---------- API: blocked ----------
 async function fetchBlockedIPs() {
-  let livePfctl = new Set();
+  let livePfctl = null;  // null = pfctl unreadable (unknown); a Set = authoritative
   try {
     const res = await apiFetch('/api/blocked');
     if (res.ok) {
       const ips = await res.json();
       if (Array.isArray(ips)) livePfctl = new Set(ips);
     }
-  } catch { /* silent */ }
+    // A null body (pfctl unavailable) leaves livePfctl null → unknown below.
+  } catch { /* silent → unknown */ }
   // Pull richer metadata (country, blockedAt) from the history endpoint.
   try {
     const res = await apiFetch('/api/block-history');
@@ -554,12 +559,13 @@ async function fetchBlockedIPs() {
       });
     }
   } catch { /* silent */ }
-  // Union live pfctl (authoritative when readable) with the persisted
-  // active list. /api/blocked returns [] when pfctl isn't readable
-  // without sudo — the persisted meta is the fallback so the UI never
-  // appears empty just because sudo timestamp expired.
-  blockedIPs = new Set(livePfctl);
-  for (const ip of blockedMeta.keys()) blockedIPs.add(ip);
+  // When pfctl is readable it is authoritative — trust it alone, so an IP
+  // unblocked elsewhere drops off immediately. When unknown (sudo timestamp
+  // not primed → 503), fall back to the persisted active list so the panel
+  // isn't empty just because sudo expired.
+  blockedIPs = livePfctl !== null
+    ? new Set(livePfctl)
+    : new Set(blockedMeta.keys());
   renderBlockedPanel();
   if (blockedCountEl) blockedCountEl.textContent = blockedIPs.size;
   blockedCntBig.textContent = blockedIPs.size;
@@ -827,6 +833,8 @@ function showVtModal(ip, content, success) {
   const overlay = document.createElement('div');
   overlay.id = 'vtOverlay';
   overlay.className = 'confirm-overlay';
+  overlay.setAttribute('role', 'dialog');
+  overlay.setAttribute('aria-modal', 'true');
   overlay.innerHTML = `
     <div class="vt-modal">
       <div class="vt-modal-header">
@@ -837,8 +845,14 @@ function showVtModal(ip, content, success) {
     </div>
   `;
   document.body.appendChild(overlay);
-  overlay.querySelector('.vt-modal-close').addEventListener('click', () => overlay.remove());
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+  const release = trapFocus(overlay);
+  const close = () => { document.removeEventListener('keydown', onEsc); release(); overlay.remove(); };
+  function onEsc(e) { if (e.key === 'Escape') { e.preventDefault(); close(); } }
+  document.addEventListener('keydown', onEsc);
+  const closeBtn = overlay.querySelector('.vt-modal-close');
+  closeBtn.focus();
+  closeBtn.addEventListener('click', close);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
 }
 
 function formatVtOutput(raw, success) {
@@ -874,6 +888,8 @@ async function showBlockedListModal() {
   const overlay = document.createElement('div');
   overlay.id = 'blockedListOverlay';
   overlay.className = 'confirm-overlay';
+  overlay.setAttribute('role', 'dialog');
+  overlay.setAttribute('aria-modal', 'true');
   overlay.innerHTML = `
     <div class="blocked-modal">
       <div class="vt-modal-header">
@@ -884,8 +900,13 @@ async function showBlockedListModal() {
     </div>
   `;
   document.body.appendChild(overlay);
+  const release = trapFocus(overlay);
+  const close = () => { document.removeEventListener('keydown', onEsc); release(); overlay.remove(); };
+  function onEsc(e) { if (e.key === 'Escape') { e.preventDefault(); close(); } }
+  document.addEventListener('keydown', onEsc);
+  overlay.querySelector('.vt-modal-close')?.focus();
   overlay.addEventListener('click', (e) => {
-    if (e.target === overlay || e.target.dataset.close === '1') overlay.remove();
+    if (e.target === overlay || e.target.dataset.close === '1') close();
   });
   await renderBlockedListBody(overlay, { selectMode: false });
 }
@@ -1041,6 +1062,8 @@ function blockIPManualAction(overlay, selectMode) {
   const dialog = document.createElement('div');
   dialog.id = 'manualBlockOverlay';
   dialog.className = 'confirm-overlay';
+  dialog.setAttribute('role', 'dialog');
+  dialog.setAttribute('aria-modal', 'true');
   dialog.innerHTML = `
     <div class="confirm-dialog sudo-dialog">
       <div class="confirm-icon">⚠</div>
@@ -1056,9 +1079,10 @@ function blockIPManualAction(overlay, selectMode) {
     </div>
   `;
   document.body.appendChild(dialog);
+  const release = trapFocus(dialog);
   const input = dialog.querySelector('.manual-ip-input');
   input.focus();
-  const close = () => dialog.remove();
+  const close = () => { release(); dialog.remove(); };
   const submit = () => {
     const ip = input.value.trim();
     if (!looksLikeIP(ip)) { showToast('Invalid IP format', 'error'); input.focus(); return; }
@@ -1249,6 +1273,11 @@ function scheduleRadarFrame() {
   radarRafScheduled = true;
   requestAnimationFrame(radarFrame);
 }
+// Reduced-motion freezes the sweep and stops the rAF loop self-scheduling.
+// Re-check via this shared query (not a fresh matchMedia() per frame) and
+// restart the loop if the user toggles the OS setting OFF while the page is open.
+const motionQuery = window.matchMedia ? matchMedia('(prefers-reduced-motion: reduce)') : null;
+motionQuery?.addEventListener?.('change', () => { lastT = 0; scheduleRadarFrame(); });
 document.addEventListener('visibilitychange', () => {
   radarTabVisible = !document.hidden;
   lastT = 0; // avoid a huge dt jump on resume
@@ -1277,6 +1306,7 @@ function sizeRadar() {
   RR = Math.floor(Math.min(RW, RH) / 2) - 24;
   layoutBearings();
   reprojectTargets();
+  reprojectCountryBorders();
 }
 window.addEventListener('resize', sizeRadar);
 // The radar-wrap size changes whenever the queue collapses, a modal
@@ -1332,10 +1362,14 @@ function project(lat, lng) {
 // every radar frame. The azimuthal-equidistant projection degenerates
 // near the antipode, so segments whose endpoints lie more than ~170°
 // apart from the home point are skipped to avoid ugly long slashes.
-let countryRings = null; // Array<Array<[lng, lat]>> | null
+let countryRings = null; // Array<Array<[lng, lat]>> | null (raw lon/lat)
+let projectedCountryRings = null; // cached Array<Array<{x,y,c}>>; rebuilt only on home/size change
 (async () => {
   try {
-    const res = await fetch('https://unpkg.com/world-atlas@2/countries-110m.json');
+    // Pinned to an exact version (the topojson-client <script> is SRI-pinned to
+    // @3.1.0). A fetch() can't carry SRI, so this is the practical hardening:
+    // an immutable, reproducible URL. CSP connect-src already limits the host.
+    const res = await fetch('https://unpkg.com/world-atlas@2.0.2/countries-110m.json');
     if (!res.ok) return;
     const topo = await res.json();
     const topojson = window.topojson;
@@ -1354,14 +1388,23 @@ let countryRings = null; // Array<Array<[lng, lat]>> | null
       }
     }
     countryRings = rings;
+    reprojectCountryBorders();
     scheduleRadarFrame();
   } catch {
     // CDN unavailable — radar just renders without borders.
   }
 })();
 
+// Rebuild the projected-border cache. The azimuthal projection depends only on
+// the home point and radar size, so we re-project on home/size change — not on
+// every frame; drawCountryBorders then just strokes the cached points.
+function reprojectCountryBorders() {
+  if (!countryRings || homeLat === null || RR <= 0) { projectedCountryRings = null; return; }
+  projectedCountryRings = countryRings.map((ring) => ring.map(([lon, lat]) => project(lat, lon)));
+}
+
 function drawCountryBorders(ctx) {
-  if (!countryRings || homeLat === null || RR <= 0) return;
+  if (!projectedCountryRings) return;
   ctx.save();
   // Clip to radar disk so overshoots don't bleed outside the ring.
   ctx.beginPath();
@@ -1370,12 +1413,10 @@ function drawCountryBorders(ctx) {
   ctx.strokeStyle = 'oklch(0.40 0.01 260 / 0.55)';
   ctx.lineWidth = 0.6;
   const CUTOFF = Math.PI * 0.92; // skip near-antipode segments
-  for (const ring of countryRings) {
+  for (const ring of projectedCountryRings) {
     ctx.beginPath();
     let prev = null;
-    for (let i = 0; i < ring.length; i++) {
-      const [lon, lat] = ring[i];
-      const p = project(lat, lon);
+    for (const p of ring) {
       if (p.c > CUTOFF) { prev = null; continue; }
       if (prev === null) ctx.moveTo(p.x, p.y);
       else ctx.lineTo(p.x, p.y);
@@ -1394,6 +1435,7 @@ function radarSetHome(lat, lon) {
   if (typeof lat !== 'number' || typeof lon !== 'number') return;
   homeLat = lat; homeLon = lon;
   reprojectTargets();
+  reprojectCountryBorders();
 }
 
 function radarUpdateTargets(sortedProcs) {
@@ -1430,7 +1472,7 @@ function radarFrame(ts) {
   radarRafScheduled = false;
   if (!radarShouldRun()) return; // stop the loop; scheduleRadarFrame() resumes it
   // Honor reduced-motion: draw one static frame, don't run the sweep loop.
-  const reduceMotion = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const reduceMotion = !!motionQuery?.matches;
   if (!reduceMotion) {
     requestAnimationFrame(radarFrame);
     radarRafScheduled = true;
