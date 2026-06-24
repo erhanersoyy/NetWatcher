@@ -59,7 +59,7 @@
     <div class="clock">
       <div class="t" id="clockT">—</div>
       <div class="d" id="clockD">—</div>
-      <div class="state" id="statusText">connecting…</div>
+      <div class="state" id="statusText" role="status">connecting…</div>
     </div>
   </header>
 
@@ -98,13 +98,13 @@
 
         <div class="sortbar">
           <span class="sl">Sort by</span>
-          <select id="sortSelect">
+          <select id="sortSelect" aria-label="Sort processes">
             <option value="connections" selected>Connections</option>
             <option value="pid">PID</option>
             <option value="name">Name</option>
           </select>
-          <button class="toolbar-btn mini" id="refreshNowBtn" title="Refresh now">↻</button>
-          <select id="refreshSelect" class="refresh-select" title="Refresh interval">
+          <button class="toolbar-btn mini" id="refreshNowBtn" title="Refresh now" aria-label="Refresh now">↻</button>
+          <select id="refreshSelect" class="refresh-select" title="Refresh interval" aria-label="Refresh interval">
             <option value="2000">2s</option>
             <option value="10000">10s</option>
             <option value="30000">30s</option>
@@ -118,7 +118,7 @@
           <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
             <circle cx="7" cy="7" r="5"></circle><path d="M11 11l3.2 3.2"></path>
           </svg>
-          <input id="searchInput" placeholder="process, ip, domain" autocomplete="off">
+          <input id="searchInput" placeholder="process, ip, domain" autocomplete="off" aria-label="Search connections">
           <span class="kbd">/</span>
         </div>
 
@@ -149,7 +149,7 @@
       <span class="reg bl"></span><span class="reg br"></span>
 
       <div class="radar-wrap">
-        <canvas id="radar"></canvas>
+        <canvas id="radar" aria-hidden="true"></canvas>
         <div class="bearings" id="bearings"></div>
 
         <div class="readouts left">
@@ -194,7 +194,7 @@
         </div>
         <div class="dial">
           <span class="k">Connections</span>
-          <span class="v ice tnum" id="dConn">0</span>
+          <span class="v ice tnum" id="dConn" aria-live="polite">0</span>
           <span class="sub" id="dConnSub">—</span>
         </div>
         <div class="dial">
@@ -208,7 +208,7 @@
         <div class="blocked-head">
           <h3>Blocked IPs <span class="cnt" id="blockedCntBig">0</span></h3>
           <div class="actions">
-            <input id="blockedSearch" placeholder="filter ip, host, reason" />
+            <input id="blockedSearch" placeholder="filter ip, host, reason" aria-label="Search blocked IPs" />
             <button id="blockedExport">Export</button>
             <button id="blockedHistory" title="Open full history with bulk actions">History…</button>
             <button class="primary" id="blockedAdd">+ Add IP</button>
