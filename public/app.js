@@ -1181,8 +1181,8 @@ function connectTrafficStream() {
       if (!row) continue;
       const rxEl = row.querySelector('[data-role="rx"]');
       const txEl = row.querySelector('[data-role="tx"]');
-      if (rxEl) rxEl.textContent = `↓${formatBytes(e.bytesIn)}`;
-      if (txEl) txEl.textContent = `↑${formatBytes(e.bytesOut)}`;
+      if (rxEl) rxEl.textContent = `↓${formatBytes(bytesIn)}`;
+      if (txEl) txEl.textContent = `↑${formatBytes(bytesOut)}`;
     }
     // Push the tick into throughput history. The stream delivers roughly 1/s.
     pushThroughput(rxBytesPerSec, txBytesPerSec);
@@ -1437,8 +1437,12 @@ function radarFrame(ts) {
   }
   if (!lastT) lastT = ts;
   const dt = (ts - lastT) / 1000; lastT = ts;
-  sweepAngle += dt * (Math.PI * 2 / 7);
-  if (sweepAngle > Math.PI) sweepAngle -= Math.PI * 2;
+  // Keep lastT current even under reduced-motion (avoids a dt jump if motion
+  // is re-enabled), but freeze the sweep so refreshes don't visibly rotate it.
+  if (!reduceMotion) {
+    sweepAngle += dt * (Math.PI * 2 / 7);
+    if (sweepAngle > Math.PI) sweepAngle -= Math.PI * 2;
+  }
 
   const ctx = radarCtx;
   ctx.clearRect(0, 0, RW, RH);
