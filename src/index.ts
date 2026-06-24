@@ -27,7 +27,12 @@ app.use('/api', (req: Request, res: Response, next: NextFunction) => {
     res.status(403).json({ success: false, message: 'Forbidden origin' });
     return;
   }
-  if (req.method !== 'GET' && req.method !== 'HEAD') {
+  // Require custom header on all /api/* routes, not just mutations. GETs
+  // like /api/host-info leak data; requiring a non-simple header forces a
+  // CORS preflight, which the Origin allowlist above rejects. SSE is
+  // exempt because EventSource cannot send custom headers — the Host +
+  // Origin checks above remain its defense.
+  if (req.path !== '/traffic-stream') {
     if (req.headers['x-requested-by'] !== 'netwatcher') {
       res.status(403).json({ success: false, message: 'Missing CSRF header' });
       return;

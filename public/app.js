@@ -7,7 +7,6 @@ const queueEl = document.getElementById('queue');
 const qEl = document.getElementById('searchInput');
 const sortSelect = document.getElementById('sortSelect');
 const chipsEl = document.getElementById('chips');
-const procCountEl = document.getElementById('procCount');
 const blockedCountEl = document.getElementById('blockedCount');
 const statusText = document.getElementById('statusText');
 const qToggleBtn = document.getElementById('qToggle');
@@ -32,8 +31,6 @@ const hCPU = document.getElementById('hCPU');
 const hCPUbar = document.getElementById('hCPUbar');
 const hMem = document.getElementById('hMem');
 const hMembar = document.getElementById('hMembar');
-const hTemp = document.getElementById('hTemp');
-const hTempbar = document.getElementById('hTempbar');
 const hLoad = document.getElementById('hLoad');
 
 // blocked panel
@@ -66,7 +63,7 @@ const expandedPids = new Set();
 let lastData = null;
 let hostInfo = null;
 let blockedIPs = new Set();
-let blockedMeta = new Map(); // ip -> { country, blockedAt }
+let blockedMeta = new Map(); // ip -> { country, countryCode, isp, blockedAt }
 let refreshTimer = null;
 let refreshIntervalMs = 300000;
 const liveTraffic = new Map();        // trafficKey -> { bytesIn, bytesOut }
@@ -76,6 +73,18 @@ const filter = { sys: true, v6: true, priv: true, q: '' };
 let blockedQ = '';
 
 const CSRF_HEADER = { 'x-requested-by': 'netwatcher' };
+
+// All /api/* requests must carry the CSRF header — the server enforces it
+// on GETs too (except SSE). Using a non-simple header forces a CORS
+// preflight on cross-origin attempts, which the Origin allowlist rejects.
+// EventSource (traffic-stream) cannot use this — it relies on Host/Origin
+// allowlist only.
+function apiFetch(url, options = {}) {
+  return fetch(url, {
+    ...options,
+    headers: { ...CSRF_HEADER, ...(options.headers || {}) },
+  });
+}
 
 // ---------- Helpers ----------
 const HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
@@ -232,7 +241,6 @@ function renderQueue(force = false) {
   const filtered = applyFilters(lastData);
   const sorted = sortProcesses(filtered);
 
-  procCountEl.textContent = `${sorted.length} visible`;
   updateExpandToggle(sorted);
 
   if (sorted.length === 0) {
@@ -309,6 +317,7 @@ function renderConnBlock(proc) {
     const countryLabel = geo
       ? `${f}${geo.city ? ' ' + escapeHtml(geo.city) + ', ' : ' '}${escapeHtml(geo.country || '')}`
       : 'resolving…';
+    const ispLabel = geo?.isp ? `<span class="isp" title="${escapeHtml(geo.isp)}">${escapeHtml(geo.isp)}</span>` : '';
 
     const dom = conn.domain && conn.domain !== '-'
       ? `<span class="dom">${escapeHtml(conn.domain)}</span>`
@@ -337,6 +346,7 @@ function renderConnBlock(proc) {
         <span class="ip"><span class="proto">${escapeHtml(conn.protocol || '')}</span><b>${escapeHtml(conn.remoteAddress)}</b><span class="port">:${conn.remotePort}</span>${dom}</span>
         <span class="meta">
           <span>${countryLabel}</span>
+          ${ispLabel}
           <span class="rx" data-role="rx">↓${formatBytes(rx)}</span>
           <span class="tx" data-role="tx">↑${formatBytes(tx)}</span>
           ${blockedTag}
@@ -468,7 +478,7 @@ footTz.textContent = Intl.DateTimeFormat().resolvedOptions().timeZone;
 // ---------- API: host info ----------
 async function fetchHostInfo({ fresh } = { fresh: false }) {
   try {
-    const res = await fetch('/api/host-info' + (fresh ? '?fresh=1' : ''));
+    const res = await apiFetch('/api/host-info' + (fresh ? '?fresh=1' : ''));
     if (!res.ok) return;
     hostInfo = await res.json();
     hostHostname.textContent = hostInfo.hostname || '—';
@@ -489,7 +499,7 @@ async function fetchHostInfo({ fresh } = { fresh: false }) {
 // ---------- API: connections ----------
 async function fetchConnections() {
   try {
-    const res = await fetch('/api/connections');
+    const res = await apiFetch('/api/connections');
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     lastData = data;
@@ -504,22 +514,35 @@ async function fetchConnections() {
 
 // ---------- API: blocked ----------
 async function fetchBlockedIPs() {
+  let livePfctl = new Set();
   try {
-    const res = await fetch('/api/blocked');
-    if (!res.ok) return;
-    const ips = await res.json();
-    blockedIPs = new Set(ips);
+    const res = await apiFetch('/api/blocked');
+    if (res.ok) {
+      const ips = await res.json();
+      if (Array.isArray(ips)) livePfctl = new Set(ips);
+    }
   } catch { /* silent */ }
   // Pull richer metadata (country, blockedAt) from the history endpoint.
   try {
-    const res = await fetch('/api/block-history');
+    const res = await apiFetch('/api/block-history');
     if (!res.ok) throw 0;
     const data = await res.json();
     blockedMeta = new Map();
     for (const rec of (data.active || [])) {
-      blockedMeta.set(rec.ip, { country: rec.country, blockedAt: rec.blockedAt });
+      blockedMeta.set(rec.ip, {
+        country: rec.country,
+        countryCode: rec.countryCode || null,
+        isp: rec.isp || null,
+        blockedAt: rec.blockedAt,
+      });
     }
   } catch { /* silent */ }
+  // Union live pfctl (authoritative when readable) with the persisted
+  // active list. /api/blocked returns [] when pfctl isn't readable
+  // without sudo — the persisted meta is the fallback so the UI never
+  // appears empty just because sudo timestamp expired.
+  blockedIPs = new Set(livePfctl);
+  for (const ip of blockedMeta.keys()) blockedIPs.add(ip);
   renderBlockedPanel();
   if (blockedCountEl) blockedCountEl.textContent = blockedIPs.size;
   blockedCntBig.textContent = blockedIPs.size;
@@ -532,7 +555,7 @@ function renderBlockedPanel() {
   const q = blockedQ.toLowerCase();
   const filtered = ips.filter(ip => {
     const meta = blockedMeta.get(ip);
-    const hay = `${ip} ${meta?.country || ''}`.toLowerCase();
+    const hay = `${ip} ${meta?.country || ''} ${meta?.isp || ''}`.toLowerCase();
     return !q || hay.includes(q);
   });
   if (filtered.length === 0) {
@@ -541,14 +564,17 @@ function renderBlockedPanel() {
   }
   blockedListEl.innerHTML = filtered.map(ip => {
     const meta = blockedMeta.get(ip) || {};
-    const cc = meta.country || '';
+    const country = meta.country || '';
+    const cc = meta.countryCode || '';
+    const isp = meta.isp || '';
     const f = flag(cc);
     const when = meta.blockedAt ? relTime(meta.blockedAt) : '—';
+    const ccLabel = f ? `${f} ${escapeHtml(country)}` : escapeHtml(country || '—');
     return `
       <div class="blocked-row" data-ip="${escapeHtml(ip)}">
         <span class="ip">${escapeHtml(ip)}</span>
-        <span class="cc">${f} ${escapeHtml(cc)}</span>
-        <span class="host"></span>
+        <span class="cc">${ccLabel}</span>
+        <span class="isp" title="${escapeHtml(isp)}">${escapeHtml(isp)}</span>
         <span class="when">${escapeHtml(when)}</span>
         <button class="un" data-action="unblock" data-ip="${escapeHtml(ip)}">Unblock</button>
       </div>
@@ -593,9 +619,9 @@ async function sendFirewallRequest(path, ip, password) {
   let body = JSON.stringify({ password });
   password = '';
   try {
-    const res = await fetch(path, {
+    const res = await apiFetch(path, {
       method: 'POST',
-      headers: { ...CSRF_HEADER, 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json' },
       body,
     });
     body = '';
@@ -650,7 +676,7 @@ function killProcessAction(pid, name, isSystem) {
 }
 async function doKill(pid) {
   try {
-    const res = await fetch(`/api/kill/${pid}`, { method: 'POST', headers: CSRF_HEADER });
+    const res = await apiFetch(`/api/kill/${pid}`, { method: 'POST' });
     const result = await res.json();
     showToast(result.message, result.success ? 'success' : 'error');
     setTimeout(fetchConnections, 500);
@@ -662,7 +688,7 @@ async function doKill(pid) {
 async function vtCheckAction(ip) {
   showVtModal(ip, 'Loading VirusTotal data…');
   try {
-    const res = await fetch(`/api/vt/${encodeURIComponent(ip)}`);
+    const res = await apiFetch(`/api/vt/${encodeURIComponent(ip)}`);
     const data = await res.json();
     showVtModal(ip, data.output, data.success);
   } catch (err) {
@@ -821,7 +847,7 @@ async function renderBlockedListBody(overlay, { selectMode }) {
   body.innerHTML = '<div class="vt-loading">Loading…</div>';
   let data;
   try {
-    const res = await fetch('/api/block-history');
+    const res = await apiFetch('/api/block-history');
     data = await res.json();
   } catch (err) {
     body.innerHTML = `<div class="vt-output vt-error">Failed to load: ${escapeHtml(err.message)}</div>`;
@@ -935,7 +961,7 @@ function wireBlockedToolbar(body, overlay, selectMode) {
       try {
         const q = new URLSearchParams({ blockedAt });
         if (btn.dataset.unblockedAt) q.set('unblockedAt', btn.dataset.unblockedAt);
-        const res = await fetch(`/api/block-history/${encodeURIComponent(ip)}?${q}`, { method: 'DELETE', headers: CSRF_HEADER });
+        const res = await apiFetch(`/api/block-history/${encodeURIComponent(ip)}?${q}`, { method: 'DELETE' });
         const result = await res.json();
         if (res.ok && result.success) {
           showToast(result.removed === 0 ? `Nothing to remove for ${ip}` : `Removed row for ${ip}`, 'success');
@@ -1181,7 +1207,7 @@ function sizeRadar() {
   radarCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
   CX = Math.round(RW / 2);
   CY = Math.round(RH / 2);
-  RR = Math.floor(Math.min(RW, RH) / 2) - 40;
+  RR = Math.floor(Math.min(RW, RH) / 2) - 24;
   layoutBearings();
   reprojectTargets();
 }
@@ -1220,7 +1246,7 @@ function layoutBearings() {
 }
 
 function project(lat, lng) {
-  if (homeLat === null) return { x: CX, y: CY };
+  if (homeLat === null) return { x: CX, y: CY, c: 0 };
   const φ1 = homeLat * Math.PI / 180;
   const λ1 = homeLon * Math.PI / 180;
   const φ2 = lat * Math.PI / 180;
@@ -1230,7 +1256,67 @@ function project(lat, lng) {
   const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(λ2 - λ1);
   const θ = Math.atan2(y, x);
   const rr = (c / Math.PI) * RR * 1.15;
-  return { x: CX + rr * Math.sin(θ), y: CY - rr * Math.cos(θ) };
+  return { x: CX + rr * Math.sin(θ), y: CY - rr * Math.cos(θ), c };
+}
+
+// ---- Country borders ----
+// Lazy-loaded and cached. Each country is stored as an array of rings,
+// each ring is an array of [lon, lat] pairs. We project & stroke these
+// every radar frame. The azimuthal-equidistant projection degenerates
+// near the antipode, so segments whose endpoints lie more than ~170°
+// apart from the home point are skipped to avoid ugly long slashes.
+let countryRings = null; // Array<Array<[lng, lat]>> | null
+(async () => {
+  try {
+    const res = await fetch('https://unpkg.com/world-atlas@2/countries-110m.json');
+    if (!res.ok) return;
+    const topo = await res.json();
+    const topojson = window.topojson;
+    if (!topojson || !topo?.objects?.countries) return;
+    const geo = topojson.feature(topo, topo.objects.countries);
+    const rings = [];
+    for (const feat of geo.features) {
+      const geom = feat.geometry;
+      if (!geom) continue;
+      if (geom.type === 'Polygon') {
+        for (const ring of geom.coordinates) rings.push(ring);
+      } else if (geom.type === 'MultiPolygon') {
+        for (const poly of geom.coordinates) {
+          for (const ring of poly) rings.push(ring);
+        }
+      }
+    }
+    countryRings = rings;
+    scheduleRadarFrame();
+  } catch {
+    // CDN unavailable — radar just renders without borders.
+  }
+})();
+
+function drawCountryBorders(ctx) {
+  if (!countryRings || homeLat === null || RR <= 0) return;
+  ctx.save();
+  // Clip to radar disk so overshoots don't bleed outside the ring.
+  ctx.beginPath();
+  ctx.arc(CX, CY, RR * 1.06, 0, Math.PI * 2);
+  ctx.clip();
+  ctx.strokeStyle = 'oklch(0.40 0.01 260 / 0.55)';
+  ctx.lineWidth = 0.6;
+  const CUTOFF = Math.PI * 0.92; // skip near-antipode segments
+  for (const ring of countryRings) {
+    ctx.beginPath();
+    let prev = null;
+    for (let i = 0; i < ring.length; i++) {
+      const [lon, lat] = ring[i];
+      const p = project(lat, lon);
+      if (p.c > CUTOFF) { prev = null; continue; }
+      if (prev === null) ctx.moveTo(p.x, p.y);
+      else ctx.lineTo(p.x, p.y);
+      prev = p;
+    }
+    ctx.stroke();
+  }
+  ctx.restore();
 }
 
 function reprojectTargets() {
@@ -1292,6 +1378,9 @@ function radarFrame(ts) {
   g.addColorStop(0, 'rgba(255,255,255,0.02)');
   g.addColorStop(1, 'rgba(0,0,0,0)');
   ctx.fillStyle = g; ctx.fillRect(0, 0, RW, RH);
+
+  // country borders (behind rings)
+  drawCountryBorders(ctx);
 
   // rings
   ctx.strokeStyle = 'oklch(0.32 0.006 260)'; ctx.lineWidth = 1;
@@ -1408,7 +1497,7 @@ function fmtBytes(n) {
 }
 async function refreshSystemHealth() {
   try {
-    const res = await fetch('/api/system-health');
+    const res = await apiFetch('/api/system-health');
     if (!res.ok) throw new Error(res.statusText);
     const h = await res.json();
     if (h.cpu == null) {
@@ -1425,13 +1514,6 @@ async function refreshSystemHealth() {
       const pct = (h.memUsedBytes / h.memTotalBytes) * 100;
       hMem.textContent = `${fmtBytes(h.memUsedBytes)} / ${fmtBytes(h.memTotalBytes)}`;
       hMembar.style.width = pct.toFixed(0) + '%';
-    }
-    if (h.tempC == null) {
-      hTemp.textContent = '—';
-      hTempbar.style.width = '0%';
-    } else {
-      hTemp.textContent = h.tempC.toFixed(0) + ' °C';
-      hTempbar.style.width = Math.min(100, h.tempC).toFixed(0) + '%';
     }
     const [l1, l5, l15] = h.load;
     hLoad.textContent = `${l1.toFixed(2)} / ${l5.toFixed(2)} / ${l15.toFixed(2)}`;
