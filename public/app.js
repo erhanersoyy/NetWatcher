@@ -1389,8 +1389,12 @@ function radarUpdateTargets(sortedProcs) {
 function radarFrame(ts) {
   radarRafScheduled = false;
   if (!radarShouldRun()) return; // stop the loop; scheduleRadarFrame() resumes it
-  requestAnimationFrame(radarFrame);
-  radarRafScheduled = true;
+  // Honor reduced-motion: draw one static frame, don't run the sweep loop.
+  const reduceMotion = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (!reduceMotion) {
+    requestAnimationFrame(radarFrame);
+    radarRafScheduled = true;
+  }
   if (!lastT) lastT = ts;
   const dt = (ts - lastT) / 1000; lastT = ts;
   sweepAngle += dt * (Math.PI * 2 / 7);

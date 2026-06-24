@@ -12,8 +12,8 @@
 
   --ink:       oklch(0.96 0.004 85);
   --ink-mid:   oklch(0.78 0.004 85);
-  --ink-dim:   oklch(0.58 0.004 85);
-  --ink-mute:  oklch(0.40 0.004 85);
+  --ink-dim:   oklch(0.72 0.004 85);
+  --ink-mute:  oklch(0.60 0.004 85);
 
   --signal:    oklch(0.74 0.25 340);
   --signal-d:  oklch(0.74 0.25 340 / 0.18);
@@ -44,6 +44,14 @@ body {
     radial-gradient(800px 500px at 90% -10%, oklch(0.74 0.25 340 / 0.07), transparent 60%);
 }
 button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+/* Accessibility: visible keyboard focus on every interactive element
+   (the button reset above strips the UA outline). */
+:focus-visible {
+  outline: 2px solid var(--ice);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+:focus:not(:focus-visible) { outline: none; }
 input, select { font: inherit; color: inherit; }
 .mono { font-family: var(--mono); }
 .tnum { font-variant-numeric: tabular-nums; }
@@ -772,4 +780,15 @@ body.tweaks-on .tweaks { display: block; }
 @keyframes toastIn {
   from { opacity: 0; transform: translate(-50%, 10px); }
   to { opacity: 1; transform: translate(-50%, 0); }
+}
+
+/* Respect reduced-motion: stop continuous, non-essential animation. The radar
+   sweep is driven from JS and gated separately (see app.js). */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
 }
