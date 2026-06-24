@@ -503,6 +503,11 @@ async function fetchConnections() {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     lastData = data;
+    // Prune liveTraffic to the currently-live connections so the Map can't grow
+    // unbounded as ephemeral sockets (TIME_WAIT, short UDP, browser conns) churn.
+    const liveKeys = new Set();
+    for (const p of data) for (const c of p.connections) liveKeys.add(c.trafficKey);
+    for (const k of liveTraffic.keys()) if (!liveKeys.has(k)) liveTraffic.delete(k);
     statusText.textContent = 'streaming · live';
     statusText.classList.remove('err', 'wait');
     renderQueue();
@@ -1112,14 +1117,18 @@ function connectTrafficStream() {
     let rxBytesPerSec = 0, txBytesPerSec = 0;
     for (const e of arr) {
       if (!e || typeof e.key !== 'string') continue;
+      const bytesIn = Number(e.bytesIn) || 0;   // no `| 0` — that truncates to 32-bit signed (wraps past ~2.1 GB)
+      const bytesOut = Number(e.bytesOut) || 0;
       const prevBytes = liveTraffic.get(e.key);
       if (prevBytes) {
-        const drx = Math.max(0, e.bytesIn - prevBytes.bytesIn);
-        const dtx = Math.max(0, e.bytesOut - prevBytes.bytesOut);
-        rxBytesPerSec += drx;
-        txBytesPerSec += dtx;
+        // A *decreasing* counter means nettop reset / the 5-tuple was reused:
+        // count the fresh absolute value rather than dropping the delta to 0.
+        const drx = bytesIn < prevBytes.bytesIn ? bytesIn : bytesIn - prevBytes.bytesIn;
+        const dtx = bytesOut < prevBytes.bytesOut ? bytesOut : bytesOut - prevBytes.bytesOut;
+        rxBytesPerSec += Math.max(0, drx);
+        txBytesPerSec += Math.max(0, dtx);
       }
-      liveTraffic.set(e.key, { bytesIn: e.bytesIn | 0, bytesOut: e.bytesOut | 0 });
+      liveTraffic.set(e.key, { bytesIn, bytesOut });
       // Patch the row in place if visible.
       const sel = `.c[data-traffic-key="${CSS.escape(e.key)}"]`;
       const row = document.querySelector(sel);
