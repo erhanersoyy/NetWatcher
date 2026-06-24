@@ -292,7 +292,7 @@ function renderProcRow(proc, i) {
   const killBtn = `<button class="kill ${proc.isSystemProcess ? 'danger' : ''}" data-action="kill" data-pid="${proc.pid}" data-name="${escapeHtml(proc.processName)}" data-system="${proc.isSystemProcess ? '1' : '0'}" title="Kill PID ${proc.pid}">kill</button>`;
 
   const rowHtml = `
-    <div class="row ${proc.isSystemProcess ? 'sys' : ''} ${expanded ? 'active' : ''}" data-action="toggle" data-pid="${proc.pid}">
+    <div class="row ${proc.isSystemProcess ? 'sys' : ''} ${expanded ? 'active' : ''}" data-action="toggle" data-pid="${proc.pid}" tabindex="0" role="button" aria-expanded="${expanded}">
       <div class="idx">${idx}</div>
       <div class="name"><span class="pname" title="${escapeHtml(proc.description || proc.processName)}">${escapeHtml(proc.processName)}</span>${killBtn}</div>
       <div class="n">
@@ -408,6 +408,15 @@ queueEl.addEventListener('click', (e) => {
   } else if (action === 'unblock') {
     unblockIPAction(el.dataset.ip);
   }
+});
+
+// Keyboard activation for process rows (Enter/Space), mirroring the click toggle.
+queueEl.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  const row = e.target.closest?.('.row[data-action="toggle"]');
+  if (!row) return;
+  e.preventDefault();            // Space must not scroll the page
+  row.click();                   // reuse the existing click→toggle path
 });
 
 // ---------- Search / sort / chips ----------
