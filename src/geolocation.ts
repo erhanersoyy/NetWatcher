@@ -71,11 +71,13 @@ export async function lookupSingleIP(ip: string): Promise<GeoInfo | null> {
   const cached = cache.get(ip);
   if (cached && Date.now() - cached.timestamp < CACHE_TTL) return cached.data;
   try {
-    const res = await serializeGeo(() =>
-      fetch(`http://ip-api.com/json/${ip}?fields=status,country,countryCode,city,isp,lat,lon`, {
-        signal: AbortSignal.timeout(5000),
-      })
-    );
+    // Single host-info lookup runs immediately (not through the batch
+    // serializer): it is cached ~24h and fires at most once every few minutes,
+    // so it can't meaningfully burst ip-api's 45 req/min — and queueing it
+    // behind the connections batch needlessly delayed first-paint geo.
+    const res = await fetch(`http://ip-api.com/json/${ip}?fields=status,country,countryCode,city,isp,lat,lon`, {
+      signal: AbortSignal.timeout(5000),
+    });
     if (!res.ok) return null;
     const d = await res.json() as { status: string; country?: string; countryCode?: string; city?: string; isp?: string; lat?: number; lon?: number };
     if (d.status !== 'success') return null;
