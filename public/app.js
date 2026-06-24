@@ -65,6 +65,7 @@ const expandedPids = new Set();
 // important event in a security tool). null until the first render so the
 // initial load doesn't flash every row.
 let prevPids = null;
+let prevConnKeys = null; // Set of `${pid}|${remoteAddress}` from the last render — to flash new destinations
 let lastData = null;
 let hostInfo = null;
 let blockedIPs = new Set();
@@ -260,6 +261,7 @@ function renderQueue(force = false) {
   // next render flashes only genuinely-new connections — not rows merely
   // revealed by toggling a filter or clearing the search.
   prevPids = new Set((lastData || []).map((p) => p.pid));
+  prevConnKeys = new Set((lastData || []).flatMap((p) => p.connections.map((c) => `${p.pid}|${c.remoteAddress}`)));
 
   // update stats strip
   const totalConns = sorted.reduce((s, p) => s + p.connections.length, 0);
@@ -285,7 +287,7 @@ function renderQueue(force = false) {
   dCtry.textContent = countries.size;
   dCtrySub.textContent = `across ${asns.size} ASN range${asns.size === 1 ? '' : 's'}`;
 
-  updateChipCounts();
+  updateChipCounts(filtered.length); // reuse the visible count we already computed
   renderTopTalkers(sorted);
   radarUpdateTargets(sorted);
   // Draw one fresh frame for the new targets. No-op while the sweep loop is
@@ -300,7 +302,12 @@ function renderQueue(force = false) {
 function flashNewRows(sorted) {
   if (prevPids === null || motionQuery?.matches) return;
   for (const p of sorted) {
-    if (prevPids.has(p.pid)) continue;
+    // Flash a row when the process is new OR it reached a NEW remote address
+    // (a new outbound connection is the event a security monitor must surface).
+    // Keyed by pid+remoteAddress so ephemeral local-port churn doesn't flash.
+    const isNewProcess = !prevPids.has(p.pid);
+    const hasNewRemote = p.connections.some((c) => !prevConnKeys.has(`${p.pid}|${c.remoteAddress}`));
+    if (!isNewProcess && !hasNewRemote) continue;
     const row = queueEl.querySelector(`.row[data-pid="${CSS.escape(String(p.pid))}"] .pname`);
     if (row) row.classList.add('flash');
   }
@@ -310,9 +317,11 @@ function flashNewRows(sorted) {
 // "(N)" badge. Each count re-runs applyFilters with that one toggle forced off,
 // holding the other toggles + search as-is; the delta in visible processes is
 // what that filter alone is removing. Cheap (lastData is small) and only on render.
-function hiddenCounts() {
+function hiddenCounts(baseCount) {
   if (!lastData) return { sys: 0, v6: 0, priv: 0 };
-  const base = applyFilters(lastData).length;
+  // Reuse renderQueue's already-computed visible count when provided, so we
+  // don't run a redundant applyFilters pass every poll.
+  const base = baseCount ?? applyFilters(lastData).length;
   const without = (key) => {
     const saved = filter[key];
     filter[key] = false;
@@ -327,8 +336,8 @@ function hiddenCounts() {
   };
 }
 
-function updateChipCounts() {
-  const counts = hiddenCounts();
+function updateChipCounts(baseCount) {
+  const counts = hiddenCounts(baseCount);
   for (const key of ['sys', 'v6', 'priv']) {
     const chip = chipsEl.querySelector(`.chip[data-f="${key}"]`);
     if (!chip) continue;
@@ -626,19 +635,32 @@ async function fetchConnections() {
     statusText.textContent = streamHealthy ? 'streaming · live' : 'poll · stream offline';
     statusText.classList.toggle('err', !streamHealthy);
     statusText.classList.remove('wait');
+    queueEl.querySelector('.queue-error-banner')?.remove(); // recovered — drop any stale-refresh banner
     renderQueue();
   } catch (err) {
     statusText.textContent = 'error';
     statusText.classList.add('err');
-    // The masthead status is far from the queue; surface the failure inline
-    // (with a Retry) so it isn't invisible. Only when we have nothing to show —
-    // a transient poll failure shouldn't blow away an already-rendered list.
+    // Surface the failure near the queue (the masthead status is far away).
     if (!lastData) {
+      // Nothing rendered yet — show the full inline error + Retry.
       queueEl.innerHTML = `
         <div class="queue-empty queue-error">
           <div>Couldn't load connections — ${escapeHtml(err.message)}</div>
           <div><button class="queue-clear-filters" data-action="retry-connections">Retry</button></div>
         </div>`;
+    } else if (!queueEl.querySelector('.queue-error-banner')) {
+      // Keep the (stale) list but flag that it stopped refreshing, with a Retry,
+      // so a sustained outage after the first successful load isn't invisible.
+      // Built with DOM APIs + textContent (no innerHTML sink).
+      const banner = document.createElement('div');
+      banner.className = 'queue-error-banner';
+      banner.textContent = `⚠ Couldn't refresh — ${err.message} `;
+      const retry = document.createElement('button');
+      retry.className = 'queue-clear-filters';
+      retry.dataset.action = 'retry-connections';
+      retry.textContent = 'Retry';
+      banner.appendChild(retry);
+      queueEl.insertBefore(banner, queueEl.firstChild);
     }
   }
 }
@@ -734,7 +756,7 @@ blockedSearch.addEventListener('input', () => {
 blockedListEl.addEventListener('click', (e) => {
   const b = e.target.closest('[data-action="unblock"]');
   if (!b) return;
-  unblockIPAction(b.dataset.ip);
+  unblockIPAction(b.dataset.ip, b); // pass the button so it's locked in-flight (no double sudo)
 });
 blockedExport.addEventListener('click', () => {
   const rows = [...blockedIPs].map(ip => {
@@ -830,7 +852,13 @@ function killProcessAction(pid, name, isSystem, btn) {
     : `Kill "${name}" (PID ${pid})? This sends SIGTERM and can't be undone.`;
   showConfirmDialog(message, () => doKill(pid, unlock), unlock, isSystem ? 'Kill Anyway' : 'Kill Process');
 }
+// PIDs with an in-flight SIGTERM. Guards against a second kill of the same PID
+// even if a 2s-poll re-render rebuilds the (lock-bearing) button mid-confirm —
+// killing a since-reused PID would otherwise hit the wrong process.
+const killsInFlight = new Set();
 async function doKill(pid, unlock) {
+  if (killsInFlight.has(pid)) { if (unlock) unlock(); return; }
+  killsInFlight.add(pid);
   try {
     const res = await apiFetch(`/api/kill/${pid}`, { method: 'POST' });
     const result = await res.json();
@@ -839,6 +867,7 @@ async function doKill(pid, unlock) {
   } catch (err) {
     showToast('Failed to kill process: ' + err.message, 'error');
   } finally {
+    killsInFlight.delete(pid);
     if (unlock) unlock();
   }
 }
