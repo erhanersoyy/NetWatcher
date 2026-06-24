@@ -4,6 +4,7 @@
 
 import { escapeHtml, isIPv6, isLocalhost, isPrivateIP, flag, formatBytes, fmtBytes, relTime, formatTime, looksLikeIP } from './util.js';
 import { el } from './dom.js';
+import { S, bus, emit, on, CSRF_HEADER } from './state.js';
 
 // ---------- DOM ----------
 const {
@@ -19,28 +20,15 @@ const {
 } = el;
 
 // ---------- State ----------
-const expandedPids = new Set();
-// PIDs present in the previous renderQueue() pass — diffed each render so a
-// newly-appearing process can be flashed (a new connection is the most
-// important event in a security tool). null until the first render so the
-// initial load doesn't flash every row.
-let prevPids = null;
-let prevConnKeys = null; // Set of `${pid}|${remoteAddress}` from the last render — to flash new destinations
-let lastData = null;
-let hostInfo = null;
-let blockedIPs = new Set();
-let blockedMeta = new Map(); // ip -> { country, countryCode, isp, blockedAt }
-let refreshTimer = null;
-let refreshIntervalMs = 300000;
-const liveTraffic = new Map();        // trafficKey -> { bytesIn, bytesOut }
-let streamHealthy = false;   // true once the SSE stream is delivering deltas
-let lastDeltaAt = 0;         // ms timestamp of the last delta (for idle decay)
-const prevConnBytes = new Map();      // connId -> bytes
-// Filter toggles — mirror the chip states on load.
-const filter = { sys: true, v6: true, priv: true, q: '' };
-let blockedQ = '';
+// Reassigned values stay as S.x — ES module live-bindings are read-only to
+// importers, so cross-module writes must mutate the shared S object.
+// Mutated-in-place values (never reassigned) are aliased locally for brevity.
+const liveTraffic  = S.liveTraffic;   // Map — only .set/.delete/.get, never =
+const expandedPids = S.expandedPids;  // Set — only .add/.delete/.has, never =
+const killsInFlight = S.killsInFlight; // Set — only .add/.delete/.has, never =
+const filter = S.filter;              // object — only .prop = val, never =
 
-const CSRF_HEADER = { 'x-requested-by': 'netwatcher' };
+const prevConnBytes = new Map();      // connId -> bytes (render-local, not cross-module)
 
 // All /api/* requests must carry the CSRF header — the server enforces it
 // on GETs too (except SSE). Using a non-simple header forces a CORS
@@ -112,10 +100,10 @@ function procSummary(proc) {
 // ---------- Render ----------
 function updateExpandToggle(visible) {
   const btn = document.getElementById('expandToggleChip');
-  if (!btn || !lastData) return;
+  if (!btn || !S.lastData) return;
   // `visible` is passed in by `renderQueue` to avoid a second applyFilters
   // pass. Chip-click path computes its own (rare, on user interaction).
-  if (!visible) visible = applyFilters(lastData);
+  if (!visible) visible = applyFilters(S.lastData);
   const allOpen = visible.length > 0 && visible.every((p) => expandedPids.has(p.pid));
   btn.classList.toggle('all-expanded', allOpen);
   const lbl = btn.querySelector('.lbl');
@@ -127,22 +115,21 @@ function updateExpandToggle(visible) {
 // the wholesale `innerHTML` rewrite when nothing visible has changed (e.g.
 // poll returned identical data, no filter/sort/expand state changed). SSE
 // delta patching still updates bytes in place under this guard.
-let lastRenderSig = '';
 function computeRenderSig() {
-  if (!lastData) return '';
+  if (!S.lastData) return '';
   const sort = sortSelect.value;
   const exp = [...expandedPids].sort((a, b) => a - b).join(',');
   const filt = `${filter.sys ? 1 : 0}${filter.v6 ? 1 : 0}${filter.priv ? 1 : 0}|${filter.q}`;
   // Include the full sorted blocked-IP list: per-row "BLOCKED" tag and
   // Block/Unblock button depend on membership, not just set size, so a
   // swap of one IP for another at the same size must invalidate the sig.
-  const blocked = [...blockedIPs].sort().join(',');
+  const blocked = [...S.blockedIPs].sort().join(',');
   // Data fingerprint: PID + conn count + remote IPs + states. Byte counts
   // are deliberately excluded — they churn every poll but SSE patches them
   // in place; re-rendering the whole list just to refresh bytes is exactly
   // the waste we're trying to skip.
   const dataParts = [];
-  for (const p of lastData) {
+  for (const p of S.lastData) {
     dataParts.push(`${p.pid}:${p.connections.length}`);
     for (const c of p.connections) {
       dataParts.push(`${c.remoteAddress}:${c.remotePort}:${c.state}`);
@@ -152,19 +139,19 @@ function computeRenderSig() {
 }
 
 function renderQueue(force = false) {
-  if (!lastData) {
+  if (!S.lastData) {
     queueEl.innerHTML = '<div class="queue-empty">Loading connections…</div>';
-    lastRenderSig = '';
+    S.lastRenderSig = '';
     return;
   }
   if (!force) {
     const sig = computeRenderSig();
-    if (sig === lastRenderSig) return;
-    lastRenderSig = sig;
+    if (sig === S.lastRenderSig) return;
+    S.lastRenderSig = sig;
   } else {
-    lastRenderSig = computeRenderSig();
+    S.lastRenderSig = computeRenderSig();
   }
-  const filtered = applyFilters(lastData);
+  const filtered = applyFilters(S.lastData);
   const sorted = sortProcesses(filtered);
 
   updateExpandToggle(sorted);
@@ -178,8 +165,8 @@ function renderQueue(force = false) {
   // Remember PIDs from the full dataset (not just the filtered view) so the
   // next render flashes only genuinely-new connections — not rows merely
   // revealed by toggling a filter or clearing the search.
-  prevPids = new Set((lastData || []).map((p) => p.pid));
-  prevConnKeys = new Set((lastData || []).flatMap((p) => p.connections.map((c) => `${p.pid}|${c.remoteAddress}`)));
+  S.prevPids = new Set((S.lastData || []).map((p) => p.pid));
+  S.prevConnKeys = new Set((S.lastData || []).flatMap((p) => p.connections.map((c) => `${p.pid}|${c.remoteAddress}`)));
 
   // update stats strip
   const totalConns = sorted.reduce((s, p) => s + p.connections.length, 0);
@@ -197,9 +184,9 @@ function renderQueue(force = false) {
     }
   }
   dProc.textContent = sorted.length;
-  const sysCount = (lastData || []).filter(p => p.isSystemProcess).length;
+  const sysCount = (S.lastData || []).filter(p => p.isSystemProcess).length;
   dProcSys.textContent = sysCount;
-  dProcUsr.textContent = (lastData || []).length - sysCount;
+  dProcUsr.textContent = (S.lastData || []).length - sysCount;
   dConn.textContent = totalConns;
   dConnSub.textContent = `${established} EST · ${timewait} TIME_WAIT · ${other} other`;
   dCtry.textContent = countries.size;
@@ -218,13 +205,13 @@ function renderQueue(force = false) {
 // in the previous render. Skipped under prefers-reduced-motion and on the very
 // first render (prevPids === null) so we don't flash the whole list on load.
 function flashNewRows(sorted) {
-  if (prevPids === null || motionQuery?.matches) return;
+  if (S.prevPids === null || motionQuery?.matches) return;
   for (const p of sorted) {
     // Flash a row when the process is new OR it reached a NEW remote address
     // (a new outbound connection is the event a security monitor must surface).
     // Keyed by pid+remoteAddress so ephemeral local-port churn doesn't flash.
-    const isNewProcess = !prevPids.has(p.pid);
-    const hasNewRemote = p.connections.some((c) => !prevConnKeys.has(`${p.pid}|${c.remoteAddress}`));
+    const isNewProcess = !S.prevPids.has(p.pid);
+    const hasNewRemote = p.connections.some((c) => !S.prevConnKeys.has(`${p.pid}|${c.remoteAddress}`));
     if (!isNewProcess && !hasNewRemote) continue;
     const row = queueEl.querySelector(`.row[data-pid="${CSS.escape(String(p.pid))}"] .pname`);
     if (row) row.classList.add('flash');
@@ -236,14 +223,14 @@ function flashNewRows(sorted) {
 // holding the other toggles + search as-is; the delta in visible processes is
 // what that filter alone is removing. Cheap (lastData is small) and only on render.
 function hiddenCounts(baseCount) {
-  if (!lastData) return { sys: 0, v6: 0, priv: 0 };
+  if (!S.lastData) return { sys: 0, v6: 0, priv: 0 };
   // Reuse renderQueue's already-computed visible count when provided, so we
   // don't run a redundant applyFilters pass every poll.
-  const base = baseCount ?? applyFilters(lastData).length;
+  const base = baseCount ?? applyFilters(S.lastData).length;
   const without = (key) => {
     const saved = filter[key];
     filter[key] = false;
-    const n = applyFilters(lastData).length;
+    const n = applyFilters(S.lastData).length;
     filter[key] = saved;
     return Math.max(0, n - base);
   };
@@ -335,7 +322,7 @@ function renderConnBlock(proc) {
     const tx = live ? live.bytesOut : conn.bytesOut;
 
     const canFirewall = !isPrivateIP(conn.remoteAddress) && !isLocalhost(conn.remoteAddress);
-    const blocked = blockedIPs.has(conn.remoteAddress);
+    const blocked = S.blockedIPs.has(conn.remoteAddress);
     const acts = [];
     if (canFirewall) {
       acts.push(`<button class="vt" data-action="vt" data-ip="${escapeHtml(conn.remoteAddress)}" title="VirusTotal lookup">VT</button>`);
@@ -455,8 +442,8 @@ chipsEl.addEventListener('click', (e) => {
   if (!b) return;
   const f = b.dataset.f;
   if (f === 'expandToggle') {
-    if (!lastData) return;
-    const visible = applyFilters(lastData);
+    if (!S.lastData) return;
+    const visible = applyFilters(S.lastData);
     const allOpen = visible.length > 0 && visible.every((p) => expandedPids.has(p.pid));
     if (allOpen) {
       expandedPids.clear();
@@ -522,18 +509,18 @@ async function fetchHostInfo({ fresh } = { fresh: false }) {
   try {
     const res = await apiFetch('/api/host-info' + (fresh ? '?fresh=1' : ''));
     if (!res.ok) return;
-    hostInfo = await res.json();
-    hostHostname.textContent = hostInfo.hostname || '—';
-    hostLocalIP.textContent = hostInfo.localIP || '—';
-    hostPublicIP.textContent = hostInfo.publicIP || '—';
-    if (hostInfo.geo) {
-      const f = flag(hostInfo.geo.countryCode);
-      const locText = `${hostInfo.geo.city ? hostInfo.geo.city + ', ' : ''}${hostInfo.geo.country || ''}`;
-      hostLocation.innerHTML = `${f} ${escapeHtml(hostInfo.geo.city ? hostInfo.geo.city + ', ' : '')}${escapeHtml(hostInfo.geo.country || '')}`;
-      hostISP.textContent = hostInfo.geo.isp || '—';
-      if (queueISP) queueISP.textContent = hostInfo.geo.isp || '—';
+    S.hostInfo = await res.json();
+    hostHostname.textContent = S.hostInfo.hostname || '—';
+    hostLocalIP.textContent = S.hostInfo.localIP || '—';
+    hostPublicIP.textContent = S.hostInfo.publicIP || '—';
+    if (S.hostInfo.geo) {
+      const f = flag(S.hostInfo.geo.countryCode);
+      const locText = `${S.hostInfo.geo.city ? S.hostInfo.geo.city + ', ' : ''}${S.hostInfo.geo.country || ''}`;
+      hostLocation.innerHTML = `${f} ${escapeHtml(S.hostInfo.geo.city ? S.hostInfo.geo.city + ', ' : '')}${escapeHtml(S.hostInfo.geo.country || '')}`;
+      hostISP.textContent = S.hostInfo.geo.isp || '—';
+      if (queueISP) queueISP.textContent = S.hostInfo.geo.isp || '—';
       if (queueGeo) queueGeo.innerHTML = `${f} ${escapeHtml(locText)}`;
-      radarSetHome(hostInfo.geo.lat, hostInfo.geo.lon);
+      radarSetHome(S.hostInfo.geo.lat, S.hostInfo.geo.lon);
     }
   } catch { /* silent */ }
 }
@@ -544,14 +531,14 @@ async function fetchConnections() {
     const res = await apiFetch('/api/connections');
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
-    lastData = data;
+    S.lastData = data;
     // Prune liveTraffic to the currently-live connections so the Map can't grow
     // unbounded as ephemeral sockets (TIME_WAIT, short UDP, browser conns) churn.
     const liveKeys = new Set();
     for (const p of data) for (const c of p.connections) liveKeys.add(c.trafficKey);
     for (const k of liveTraffic.keys()) if (!liveKeys.has(k)) liveTraffic.delete(k);
-    statusText.textContent = streamHealthy ? 'streaming · live' : 'poll · stream offline';
-    statusText.classList.toggle('err', !streamHealthy);
+    statusText.textContent = S.streamHealthy ? 'streaming · live' : 'poll · stream offline';
+    statusText.classList.toggle('err', !S.streamHealthy);
     statusText.classList.remove('wait');
     queueEl.querySelector('.queue-error-banner')?.remove(); // recovered — drop any stale-refresh banner
     renderQueue();
@@ -559,7 +546,7 @@ async function fetchConnections() {
     statusText.textContent = 'error';
     statusText.classList.add('err');
     // Surface the failure near the queue (the masthead status is far away).
-    if (!lastData) {
+    if (!S.lastData) {
       // Nothing rendered yet — show the full inline error + Retry.
       queueEl.innerHTML = `
         <div class="queue-empty queue-error">
@@ -599,9 +586,9 @@ async function fetchBlockedIPs() {
     const res = await apiFetch('/api/block-history');
     if (!res.ok) throw 0;
     const data = await res.json();
-    blockedMeta = new Map();
+    S.blockedMeta = new Map();
     for (const rec of (data.active || [])) {
-      blockedMeta.set(rec.ip, {
+      S.blockedMeta.set(rec.ip, {
         country: rec.country,
         countryCode: rec.countryCode || null,
         isp: rec.isp || null,
@@ -618,20 +605,20 @@ async function fetchBlockedIPs() {
   // Known limitation: an IP unblocked out-of-band (reboot / external `pfctl -F`)
   // keeps showing until it's unblocked in-app — reconciling that safely needs a
   // feature (re-apply rules on launch), not a guess against an empty snapshot.
-  blockedIPs = new Set(livePfctl ?? []);
-  for (const ip of blockedMeta.keys()) blockedIPs.add(ip);
+  S.blockedIPs = new Set(livePfctl ?? []);
+  for (const ip of S.blockedMeta.keys()) S.blockedIPs.add(ip);
   renderBlockedPanel();
-  if (blockedCountEl) blockedCountEl.textContent = blockedIPs.size;
-  blockedCntBig.textContent = blockedIPs.size;
-  footBlocked.textContent = blockedIPs.size;
-  if (lastData) renderQueue();
+  if (blockedCountEl) blockedCountEl.textContent = S.blockedIPs.size;
+  blockedCntBig.textContent = S.blockedIPs.size;
+  footBlocked.textContent = S.blockedIPs.size;
+  if (S.lastData) renderQueue();
 }
 
 function renderBlockedPanel() {
-  const ips = [...blockedIPs];
-  const q = blockedQ.toLowerCase();
+  const ips = [...S.blockedIPs];
+  const q = S.blockedQ.toLowerCase();
   const filtered = ips.filter(ip => {
-    const meta = blockedMeta.get(ip);
+    const meta = S.blockedMeta.get(ip);
     const hay = `${ip} ${meta?.country || ''} ${meta?.isp || ''}`.toLowerCase();
     return !q || hay.includes(q);
   });
@@ -640,7 +627,7 @@ function renderBlockedPanel() {
     return;
   }
   blockedListEl.innerHTML = filtered.map(ip => {
-    const meta = blockedMeta.get(ip) || {};
+    const meta = S.blockedMeta.get(ip) || {};
     const country = meta.country || '';
     const cc = meta.countryCode || '';
     const isp = meta.isp || '';
@@ -660,7 +647,7 @@ function renderBlockedPanel() {
 }
 
 blockedSearch.addEventListener('input', () => {
-  blockedQ = blockedSearch.value;
+  S.blockedQ = blockedSearch.value;
   renderBlockedPanel();
 });
 blockedListEl.addEventListener('click', (e) => {
@@ -669,8 +656,8 @@ blockedListEl.addEventListener('click', (e) => {
   unblockIPAction(b.dataset.ip, b); // pass the button so it's locked in-flight (no double sudo)
 });
 blockedExport.addEventListener('click', () => {
-  const rows = [...blockedIPs].map(ip => {
-    const m = blockedMeta.get(ip) || {};
+  const rows = [...S.blockedIPs].map(ip => {
+    const m = S.blockedMeta.get(ip) || {};
     return `${ip},${m.country || ''},${m.blockedAt ? new Date(m.blockedAt).toISOString() : ''}`;
   });
   const csv = 'ip,country,blockedAt\n' + rows.join('\n');
@@ -721,7 +708,7 @@ function blockIPAction(ip, btn) {
       password = '';
       showToast(result.message, result.success ? 'success' : 'error');
       if (result.success) {
-        blockedIPs.add(ip);
+        S.blockedIPs.add(ip);
         await fetchBlockedIPs();
       }
     } catch (err) {
@@ -740,7 +727,7 @@ function unblockIPAction(ip, btn) {
       password = '';
       showToast(result.message, result.success ? 'success' : 'error');
       if (result.success) {
-        blockedIPs.delete(ip);
+        S.blockedIPs.delete(ip);
         await fetchBlockedIPs();
       }
     } catch (err) {
@@ -765,7 +752,7 @@ function killProcessAction(pid, name, isSystem, btn) {
 // PIDs with an in-flight SIGTERM. Guards against a second kill of the same PID
 // even if a 2s-poll re-render rebuilds the (lock-bearing) button mid-confirm —
 // killing a since-reused PID would otherwise hit the wrong process.
-const killsInFlight = new Set();
+// killsInFlight is aliased from S at the top of the State section.
 async function doKill(pid, unlock) {
   if (killsInFlight.has(pid)) { if (unlock) unlock(); return; }
   killsInFlight.add(pid);
@@ -1089,7 +1076,7 @@ function wireBlockedToolbar(body, overlay, selectMode) {
           const r = await sendFirewallRequest(`/api/unblock/${encodeURIComponent(ip)}`, ip, password);
           password = '';
           showToast(r.message, r.success ? 'success' : 'error');
-          if (r.success) { blockedIPs.delete(ip); await fetchBlockedIPs(); await renderBlockedListBody(overlay, { selectMode }); }
+          if (r.success) { S.blockedIPs.delete(ip); await fetchBlockedIPs(); await renderBlockedListBody(overlay, { selectMode }); }
         } catch (err) { showToast('Failed to unblock IP: ' + err.message, 'error'); }
       });
     });
@@ -1103,7 +1090,7 @@ function wireBlockedToolbar(body, overlay, selectMode) {
           const r = await sendFirewallRequest(`/api/block/${encodeURIComponent(ip)}`, ip, password);
           password = '';
           showToast(r.message, r.success ? 'success' : 'error');
-          if (r.success) { blockedIPs.add(ip); await fetchBlockedIPs(); await renderBlockedListBody(overlay, { selectMode }); }
+          if (r.success) { S.blockedIPs.add(ip); await fetchBlockedIPs(); await renderBlockedListBody(overlay, { selectMode }); }
         } catch (err) { showToast('Failed to reblock IP: ' + err.message, 'error'); }
       });
     });
@@ -1176,7 +1163,7 @@ function blockIPManualAction(overlay, selectMode) {
         password = '';
         showToast(r.message, r.success ? 'success' : 'error');
         if (r.success) {
-          blockedIPs.add(ip);
+          S.blockedIPs.add(ip);
           await fetchBlockedIPs();
           if (overlay) await renderBlockedListBody(overlay, { selectMode });
         }
@@ -1200,7 +1187,7 @@ function unblockBulkAction(ips, overlay) {
       for (const ip of ips) {
         try {
           const r = await sendFirewallRequest(`/api/unblock/${encodeURIComponent(ip)}`, ip, password);
-          if (r.success) { ok += 1; blockedIPs.delete(ip); }
+          if (r.success) { ok += 1; S.blockedIPs.delete(ip); }
           else {
             fail += 1;
             if (typeof r.message === 'string' && /sudo authentication/i.test(r.message)) { aborted = true; break; }
@@ -1255,8 +1242,8 @@ function connectTrafficStream() {
     try { arr = JSON.parse(ev.data); } catch { return; }
     if (!Array.isArray(arr)) return;
 
-    streamHealthy = true;
-    lastDeltaAt = Date.now();
+    S.streamHealthy = true;
+    S.lastDeltaAt = Date.now();
 
     let rxBytesPerSec = 0, txBytesPerSec = 0;
     for (const e of arr) {
@@ -1288,17 +1275,17 @@ function connectTrafficStream() {
 
   es.addEventListener('error', () => {
     // EventSource auto-reconnects, but surface the degraded state meanwhile.
-    streamHealthy = false;
+    S.streamHealthy = false;
   });
-  es.addEventListener('open', () => { streamHealthy = true; });
+  es.addEventListener('open', () => { S.streamHealthy = true; });
 
   // Decay the throughput readout to 0 when no deltas arrive (the server only
   // emits a delta when traffic > 0). Paused while the tab is hidden.
   setInterval(() => {
     if (document.visibilityState !== 'visible') return;
-    if (lastDeltaAt && Date.now() - lastDeltaAt >= 1500) {
+    if (S.lastDeltaAt && Date.now() - S.lastDeltaAt >= 1500) {
       pushThroughput(0, 0);
-      lastDeltaAt = Date.now(); // keep ticking 0s while idle, but only once/window
+      S.lastDeltaAt = Date.now(); // keep ticking 0s while idle, but only once/window
     }
   }, 1000);
 }
@@ -1749,11 +1736,11 @@ async function refreshAll({ fresh } = { fresh: false }) {
   await Promise.all([fetchConnections(), fetchHostInfo({ fresh }), fetchBlockedIPs()]);
 }
 function scheduleRefresh() {
-  if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
-  if (refreshIntervalMs > 0) refreshTimer = setInterval(() => refreshAll({ fresh: false }), refreshIntervalMs);
+  if (S.refreshTimer) { clearInterval(S.refreshTimer); S.refreshTimer = null; }
+  if (S.refreshIntervalMs > 0) S.refreshTimer = setInterval(() => refreshAll({ fresh: false }), S.refreshIntervalMs);
 }
 refreshSelect.addEventListener('change', () => {
-  refreshIntervalMs = parseInt(refreshSelect.value, 10) || 2000;
+  S.refreshIntervalMs = parseInt(refreshSelect.value, 10) || 2000;
   footRefresh.textContent = refreshSelect.options[refreshSelect.selectedIndex].textContent;
   scheduleRefresh();
 });
