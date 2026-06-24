@@ -724,12 +724,34 @@ function showToast(message, type) {
   setTimeout(() => toast.remove(), 3000);
 }
 
+// Minimal modal focus management: save the previously-focused element, trap
+// Tab within the overlay, and restore focus on close. Returns a cleanup fn.
+function trapFocus(overlay) {
+  const prev = document.activeElement;
+  const sel = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
+  const onKey = (e) => {
+    if (e.key !== 'Tab') return;
+    const items = [...overlay.querySelectorAll(sel)].filter((el) => !el.disabled && el.offsetParent !== null);
+    if (!items.length) return;
+    const first = items[0], last = items[items.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  };
+  overlay.addEventListener('keydown', onKey);
+  return () => {
+    overlay.removeEventListener('keydown', onKey);
+    if (prev && typeof prev.focus === 'function') prev.focus();
+  };
+}
+
 function showConfirmDialog(message, onConfirm) {
   const existing = document.getElementById('confirmOverlay');
   if (existing) existing.remove();
   const overlay = document.createElement('div');
   overlay.id = 'confirmOverlay';
   overlay.className = 'confirm-overlay';
+  overlay.setAttribute('role', 'dialog');
+  overlay.setAttribute('aria-modal', 'true');
   overlay.innerHTML = `
     <div class="confirm-dialog">
       <div class="confirm-icon">⚠</div>
@@ -741,9 +763,15 @@ function showConfirmDialog(message, onConfirm) {
     </div>
   `;
   document.body.appendChild(overlay);
-  overlay.querySelector('.confirm-cancel').addEventListener('click', () => overlay.remove());
-  overlay.querySelector('.confirm-kill').addEventListener('click', () => { overlay.remove(); onConfirm(); });
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+  const release = trapFocus(overlay);
+  const close = () => { release(); overlay.remove(); };
+  overlay.querySelector('.confirm-kill').focus(); // sensible initial focus
+  document.addEventListener('keydown', function esc(e) {
+    if (e.key === 'Escape') { e.preventDefault(); close(); document.removeEventListener('keydown', esc); }
+  });
+  overlay.querySelector('.confirm-cancel').addEventListener('click', close);
+  overlay.querySelector('.confirm-kill').addEventListener('click', () => { close(); onConfirm(); });
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
 }
 
 function askSudoPassword(action, ip, onSubmit) {
@@ -752,6 +780,8 @@ function askSudoPassword(action, ip, onSubmit) {
   const overlay = document.createElement('div');
   overlay.id = 'sudoOverlay';
   overlay.className = 'confirm-overlay';
+  overlay.setAttribute('role', 'dialog');
+  overlay.setAttribute('aria-modal', 'true');
   overlay.innerHTML = `
     <div class="confirm-dialog sudo-dialog">
       <div class="confirm-icon">⚠</div>
@@ -771,11 +801,13 @@ function askSudoPassword(action, ip, onSubmit) {
     </div>
   `;
   document.body.appendChild(overlay);
+  const release = trapFocus(overlay);
   const input = overlay.querySelector('.sudo-input');
   input.focus();
   const cleanup = (submitted) => {
     let pwd = submitted ? input.value : '';
     input.value = '';
+    release();
     overlay.remove();
     return pwd;
   };
