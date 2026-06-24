@@ -6,7 +6,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - Node.js, TypeScript (strict), Express 5, Vanilla JS frontend
 - pnpm 9.15.4 (via corepack), tsx for dev
-- globe.gl (Three.js) loaded from CDN — not bundled
 - macOS only (depends on `lsof`)
 
 ## Commands
@@ -45,7 +44,7 @@ Single-process Node.js server: Express backend serves a static vanilla JS fronte
 - **No build step** — vanilla JS/CSS served as static files
 - `app.js` polls `/api/connections` every 2s, renders expandable process cards
 - Filters (client-side): exclude IPv6, exclude private IPs, exclude localhost, hide system processes; text search across process/IP/domain/country/ISP
-- 3D globe (globe.gl): HTML pin elements with pulse animation, arc hover highlighting (dims others on hover)
+- 2D canvas radar: rotating sweep + country pins (`topojson-client` for coastlines), gated by Resize/Intersection/visibility observers
 - System processes show caution badge; kill triggers a confirmation dialog
 - Per-row actions: VirusTotal lookup (`VT` button) and firewall block/unblock (opens/closes the pfctl entry)
 
@@ -53,7 +52,7 @@ Single-process Node.js server: Express backend serves a static vanilla JS fronte
 
 - **ip-api.com** — Free tier, 45 req/min, no API key. Batch endpoint is critical for staying under the limit.
 - **ipify.org** — Public IP detection, 5s timeout
-- **unpkg.com CDN** — globe.gl and three-globe assets (earth textures)
+- **unpkg.com CDN** — `topojson-client` (decodes the bundled world TopoJSON into coastline paths for the radar)
 
 ## Code Style
 

@@ -73,3 +73,9 @@ export interface BlockHistoryResponse {
   active: BlockRecord[];
   history: BlockEvent[];
 }
+
+/** Standard result for state-changing actions (block/unblock/kill/etc.). */
+export interface ActionResult {
+  success: boolean;
+  message: string;
+}

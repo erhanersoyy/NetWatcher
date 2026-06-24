@@ -4,6 +4,7 @@ import { isIP } from 'node:net';
 import { safeEndStdin } from './proc-io.js';
 import { recordBlock, recordUnblock } from './block-store.js';
 import { lookupSingleIP } from './geolocation.js';
+import type { ActionResult } from './types.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -113,7 +114,7 @@ async function ensureAnchor(): Promise<void> {
   }
 }
 
-export async function blockIP(ip: string, password: string): Promise<{ success: boolean; message: string }> {
+export async function blockIP(ip: string, password: string): Promise<ActionResult> {
   if (!isBlockableIP(ip)) {
     return { success: false, message: 'Invalid or non-blockable IP address' };
   }
@@ -172,7 +173,7 @@ export async function blockIP(ip: string, password: string): Promise<{ success: 
   }
 }
 
-export async function unblockIP(ip: string, password: string): Promise<{ success: boolean; message: string }> {
+export async function unblockIP(ip: string, password: string): Promise<ActionResult> {
   if (!isBlockableIP(ip)) {
     return { success: false, message: 'Invalid or non-blockable IP address' };
   }
