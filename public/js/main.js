@@ -4,19 +4,19 @@
 
 import { escapeHtml, isIPv6, isLocalhost, isPrivateIP, flag, formatBytes, fmtBytes, relTime, formatTime, looksLikeIP } from './util.js';
 import { el } from './dom.js';
-import { S, bus, emit, on, CSRF_HEADER } from './state.js';
+import { S, emit, on } from './state.js';
+import { fetchConnections, fetchHostInfo, fetchBlockedIPs, sendFirewallRequest, apiFetch } from './api.js';
 
 // ---------- DOM ----------
 const {
-  queueEl, qEl, sortSelect, chipsEl, blockedCountEl, statusText,
+  queueEl, qEl, sortSelect, chipsEl, statusText,
   qToggleBtn, qToggleIcon, refreshSelect, refreshNowBtn,
   tRx, tTx, gRx, gTx,
   dProc, dProcSys, dProcUsr, dConn, dConnSub, dCtry, dCtrySub,
   talkersListEl, hCPU, hCPUbar, hMem, hMembar, hLoad,
-  blockedListEl, blockedSearch, blockedCntBig, blockedExport, blockedAdd, blockedHistoryBtn,
-  footRefresh, footSort, footTz, footBlocked,
-  clockT, clockD, hostHostname, hostLocalIP, hostPublicIP, hostLocation, hostISP,
-  queueISP, queueGeo,
+  blockedListEl, blockedSearch, blockedExport, blockedAdd, blockedHistoryBtn,
+  footRefresh, footSort, footTz,
+  clockT, clockD,
 } = el;
 
 // ---------- State ----------
@@ -29,18 +29,6 @@ const killsInFlight = S.killsInFlight; // Set — only .add/.delete/.has, never 
 const filter = S.filter;              // object — only .prop = val, never =
 
 const prevConnBytes = new Map();      // connId -> bytes (render-local, not cross-module)
-
-// All /api/* requests must carry the CSRF header — the server enforces it
-// on GETs too (except SSE). Using a non-simple header forces a CORS
-// preflight on cross-origin attempts, which the Origin allowlist rejects.
-// EventSource (traffic-stream) cannot use this — it relies on Host/Origin
-// allowlist only.
-function apiFetch(url, options = {}) {
-  return fetch(url, {
-    ...options,
-    headers: { ...CSRF_HEADER, ...(options.headers || {}) },
-  });
-}
 
 // ---------- Helpers (pure fns imported from util.js) ----------
 // The server now stamps each EnrichedConnection with its canonical `trafficKey`
@@ -504,116 +492,6 @@ function tickClock() {
 setInterval(tickClock, 1000); tickClock();
 footTz.textContent = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
-// ---------- API: host info ----------
-async function fetchHostInfo({ fresh } = { fresh: false }) {
-  try {
-    const res = await apiFetch('/api/host-info' + (fresh ? '?fresh=1' : ''));
-    if (!res.ok) return;
-    S.hostInfo = await res.json();
-    hostHostname.textContent = S.hostInfo.hostname || '—';
-    hostLocalIP.textContent = S.hostInfo.localIP || '—';
-    hostPublicIP.textContent = S.hostInfo.publicIP || '—';
-    if (S.hostInfo.geo) {
-      const f = flag(S.hostInfo.geo.countryCode);
-      const locText = `${S.hostInfo.geo.city ? S.hostInfo.geo.city + ', ' : ''}${S.hostInfo.geo.country || ''}`;
-      hostLocation.innerHTML = `${f} ${escapeHtml(S.hostInfo.geo.city ? S.hostInfo.geo.city + ', ' : '')}${escapeHtml(S.hostInfo.geo.country || '')}`;
-      hostISP.textContent = S.hostInfo.geo.isp || '—';
-      if (queueISP) queueISP.textContent = S.hostInfo.geo.isp || '—';
-      if (queueGeo) queueGeo.innerHTML = `${f} ${escapeHtml(locText)}`;
-      radarSetHome(S.hostInfo.geo.lat, S.hostInfo.geo.lon);
-    }
-  } catch { /* silent */ }
-}
-
-// ---------- API: connections ----------
-async function fetchConnections() {
-  try {
-    const res = await apiFetch('/api/connections');
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    S.lastData = data;
-    // Prune liveTraffic to the currently-live connections so the Map can't grow
-    // unbounded as ephemeral sockets (TIME_WAIT, short UDP, browser conns) churn.
-    const liveKeys = new Set();
-    for (const p of data) for (const c of p.connections) liveKeys.add(c.trafficKey);
-    for (const k of liveTraffic.keys()) if (!liveKeys.has(k)) liveTraffic.delete(k);
-    statusText.textContent = S.streamHealthy ? 'streaming · live' : 'poll · stream offline';
-    statusText.classList.toggle('err', !S.streamHealthy);
-    statusText.classList.remove('wait');
-    queueEl.querySelector('.queue-error-banner')?.remove(); // recovered — drop any stale-refresh banner
-    renderQueue();
-  } catch (err) {
-    statusText.textContent = 'error';
-    statusText.classList.add('err');
-    // Surface the failure near the queue (the masthead status is far away).
-    if (!S.lastData) {
-      // Nothing rendered yet — show the full inline error + Retry.
-      queueEl.innerHTML = `
-        <div class="queue-empty queue-error">
-          <div>Couldn't load connections — ${escapeHtml(err.message)}</div>
-          <div><button class="queue-clear-filters" data-action="retry-connections">Retry</button></div>
-        </div>`;
-    } else if (!queueEl.querySelector('.queue-error-banner')) {
-      // Keep the (stale) list but flag that it stopped refreshing, with a Retry,
-      // so a sustained outage after the first successful load isn't invisible.
-      // Built with DOM APIs + textContent (no innerHTML sink).
-      const banner = document.createElement('div');
-      banner.className = 'queue-error-banner';
-      banner.textContent = `⚠ Couldn't refresh — ${err.message} `;
-      const retry = document.createElement('button');
-      retry.className = 'queue-clear-filters';
-      retry.dataset.action = 'retry-connections';
-      retry.textContent = 'Retry';
-      banner.appendChild(retry);
-      queueEl.insertBefore(banner, queueEl.firstChild);
-    }
-  }
-}
-
-// ---------- API: blocked ----------
-async function fetchBlockedIPs() {
-  let livePfctl = null;  // null = pfctl unreadable (unknown); a Set = authoritative
-  try {
-    const res = await apiFetch('/api/blocked');
-    if (res.ok) {
-      const ips = await res.json();
-      if (Array.isArray(ips)) livePfctl = new Set(ips);
-    }
-    // A null body (pfctl unavailable) leaves livePfctl null → unknown below.
-  } catch { /* silent → unknown */ }
-  // Pull richer metadata (country, blockedAt) from the history endpoint.
-  try {
-    const res = await apiFetch('/api/block-history');
-    if (!res.ok) throw 0;
-    const data = await res.json();
-    S.blockedMeta = new Map();
-    for (const rec of (data.active || [])) {
-      S.blockedMeta.set(rec.ip, {
-        country: rec.country,
-        countryCode: rec.countryCode || null,
-        isp: rec.isp || null,
-        blockedAt: rec.blockedAt,
-      });
-    }
-  } catch { /* silent */ }
-  // Display source = the persisted active list (stable: it survives the common
-  // case where pfctl is unreadable because the sudo timestamp lapsed ~5 min
-  // after the last action), unioned with live pfctl when it IS readable so a
-  // block made outside the app still shows. We deliberately do NOT switch
-  // sources between polls — that flickered IPs in and out as sudo readability
-  // toggled, and made the panel disagree with the history modal.
-  // Known limitation: an IP unblocked out-of-band (reboot / external `pfctl -F`)
-  // keeps showing until it's unblocked in-app — reconciling that safely needs a
-  // feature (re-apply rules on launch), not a guess against an empty snapshot.
-  S.blockedIPs = new Set(livePfctl ?? []);
-  for (const ip of S.blockedMeta.keys()) S.blockedIPs.add(ip);
-  renderBlockedPanel();
-  if (blockedCountEl) blockedCountEl.textContent = S.blockedIPs.size;
-  blockedCntBig.textContent = S.blockedIPs.size;
-  footBlocked.textContent = S.blockedIPs.size;
-  if (S.lastData) renderQueue();
-}
-
 function renderBlockedPanel() {
   const ips = [...S.blockedIPs];
   const q = S.blockedQ.toLowerCase();
@@ -681,22 +559,6 @@ function lockBtn(btn) {
   if (!btn) return () => {};
   btn.disabled = true;
   return () => { if (btn.isConnected) btn.disabled = false; };
-}
-
-async function sendFirewallRequest(path, ip, password) {
-  let body = JSON.stringify({ password });
-  password = '';
-  try {
-    const res = await apiFetch(path, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body,
-    });
-    body = '';
-    return await res.json();
-  } finally {
-    body = '';
-  }
 }
 
 function blockIPAction(ip, btn) {
@@ -1753,6 +1615,14 @@ refreshNowBtn.addEventListener('click', async () => {
 // Initial foot text sync
 footRefresh.textContent = refreshSelect.options[refreshSelect.selectedIndex].textContent;
 footSort.textContent = sortSelect.value;
+
+// ---------- Bus subscriptions (temporary — render fns move in Tasks 6/7/8/10) ----------
+// api.js emits these events instead of calling render fns directly, breaking
+// the circular-import hazard. Once each render fn moves to its own module,
+// it subscribes itself and this subscription is deleted.
+on('data:changed', () => renderQueue());
+on('blocked:changed', () => renderBlockedPanel());
+on('host:changed', ({ lat, lon }) => radarSetHome(lat, lon));
 
 // ---------- Init ----------
 statusText.classList.add('wait');
