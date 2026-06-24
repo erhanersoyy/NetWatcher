@@ -15,7 +15,6 @@ export interface SystemHealth {
   memUsedBytes: number | null;
   memTotalBytes: number;
   load: [number, number, number];
-  tempC: number | null;        // null when unavailable (no sudo for powermetrics)
 }
 
 /**
@@ -58,13 +57,6 @@ function parseTop(out: string): { cpu: number | null; memUsed: number | null } {
   return { cpu, memUsed };
 }
 
-/**
- * SoC temperature: intentionally unavailable without sudo. Apple's clean
- * reading requires `powermetrics` (sudo), and sudo-free paths are not
- * consistently reliable across hardware. UI renders null as "—".
- */
-const TEMP_C: number | null = null;
-
 export async function getSystemHealth(): Promise<SystemHealth> {
   const totalBytes = totalmem();
   const [one, five, fifteen] = loadavg();
@@ -90,6 +82,5 @@ export async function getSystemHealth(): Promise<SystemHealth> {
     memUsedBytes: memUsed,
     memTotalBytes: totalBytes,
     load: [one, five, fifteen],
-    tempC: TEMP_C,
   };
 }
