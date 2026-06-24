@@ -112,37 +112,6 @@ export function deleteBlockHistoryRow(
   });
 }
 
-// Bring the persisted `active` map in line with a fresh pfctl snapshot.
-// Any IP we think is active but pfctl doesn't have is treated as an
-// implicit unblock (reboot, external `pfctl -F all`, anchor never
-// re-loaded, etc.) — we append an unblock event so the history timeline
-// stays coherent rather than claiming a block that isn't actually in
-// effect. No-op when nothing drifted. Callers must only invoke this
-// with an AUTHORITATIVE snapshot (never null/unknown).
-export function reconcileActive(livePfctlIPs: string[]): Promise<{ removed: string[] }> {
-  return serialize(async () => {
-    const live = new Set(livePfctlIPs);
-    const store = await readStore();
-    const orphans = Object.keys(store.active).filter((ip) => !live.has(ip));
-    if (orphans.length === 0) return { removed: [] };
-    const at = Date.now();
-    for (const ip of orphans) {
-      const prev = store.active[ip];
-      delete store.active[ip];
-      store.history.push({
-        ip,
-        action: 'unblock',
-        at,
-        country: prev?.country ?? null,
-        countryCode: prev?.countryCode ?? null,
-        isp: prev?.isp ?? null,
-      });
-    }
-    await writeStore(store);
-    return { removed: orphans };
-  });
-}
-
 export async function getBlockHistory(): Promise<BlockHistoryResponse> {
   const store = await readStore();
   return {

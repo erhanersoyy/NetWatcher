@@ -9,8 +9,8 @@ import { subscribeTrafficStream, getLatestTrafficStats } from './traffic-stream.
 import { getProcessMeta } from './process-info.js';
 import { killProcess } from './process-kill.js';
 import { vtLookup } from './virustotal.js';
-import { blockIP, unblockIP, getBlockedIPs, getBlockedIPsOrNull } from './firewall.js';
-import { getBlockHistory, deleteBlockHistoryRow, reconcileActive } from './block-store.js';
+import { blockIP, unblockIP, getBlockedIPsOrNull } from './firewall.js';
+import { getBlockHistory, deleteBlockHistoryRow } from './block-store.js';
 import { getSystemHealth } from './system-health.js';
 import { pickPrimaryIPv4 } from './net-iface.js';
 import type { ProcessInfo, EnrichedConnection, HostInfo } from './types.js';
@@ -188,18 +188,21 @@ router.get('/api/system-health', async (_req, res) => {
 });
 
 router.get('/api/blocked', async (_req, res) => {
-  const ips = await getBlockedIPs();
-  res.json(ips);
+  // Returns the authoritative IP array when pfctl is readable, or JSON `null`
+  // when it isn't (sudo timestamp not primed). The client treats null as
+  // "unknown" and falls back to the persisted active list, rather than
+  // mistaking an unreadable table for zero active blocks. We send null (200)
+  // rather than a 503 so a sudo-less poll doesn't spam the console with errors.
+  res.json(await getBlockedIPsOrNull());
 });
 
 router.get('/api/block-history', async (_req, res) => {
-  // Before returning, reconcile the persisted store against live pfctl.
-  // If we get an authoritative snapshot, close out any "active" records
-  // that pfctl no longer enforces (drift after reboot / external flush).
-  // If we can't read pfctl (sudo timestamp not primed), skip — we don't
-  // want to mass-unblock on a false negative.
-  const live = await getBlockedIPsOrNull();
-  if (live !== null) await reconcileActive(live);
+  // Pure read — no reconciliation. Reconciling against a live pfctl snapshot on
+  // every poll was unsafe: after a reboot pfctl reports the table as gone (an
+  // authoritative empty list), which fabricated bulk "unblock" events and
+  // deleted still-wanted records; it also raced in-flight unblocks into
+  // duplicate history rows and double-spawned pfctl per refresh. block/unblock
+  // remain the authoritative mutators of the persisted store.
   const data = await getBlockHistory();
   res.json(data);
 });

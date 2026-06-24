@@ -23,6 +23,9 @@ export function pickPrimaryIPv4(nets: NodeJS.Dict<os.NetworkInterfaceInfo[]>): s
     if (isVirtual(name)) continue;
     for (const net of nets[name] ?? []) {
       if (net.family !== 'IPv4' || net.internal) continue;
+      // Skip APIPA/link-local self-assigned addresses (169.254.0.0/16) — a
+      // disconnected adapter can carry one and it is not a real LAN address.
+      if (net.address.startsWith('169.254.')) continue;
       if (name.startsWith('en')) {
         if (!preferred) preferred = net.address;
       } else if (!fallback) {
