@@ -288,6 +288,15 @@ body.queue-collapsed .q-collapsed-rail { display: flex; }
   color: var(--ink-mid); background: var(--bg-lift);
 }
 .queue-clear-filters:hover { color: var(--ink); border-color: var(--ink-mid); }
+/* Non-destructive "stopped refreshing" strip above a preserved (stale) list. */
+.queue-error-banner {
+  display: flex; align-items: center; gap: 10px;
+  margin-bottom: 8px; padding: 8px 12px;
+  font-family: var(--mono); font-size: 11px;
+  color: var(--red); background: var(--red-d);
+  border: 1px solid var(--red); border-radius: var(--rp);
+}
+.queue-error-banner button { margin-left: auto; }
 
 .row {
   display: grid;
