@@ -6,6 +6,7 @@ import { escapeHtml, isIPv6, isLocalhost, isPrivateIP, flag, formatBytes, fmtByt
 import { el } from './dom.js';
 import { S, emit, on } from './state.js';
 import { fetchConnections, fetchHostInfo, fetchBlockedIPs, sendFirewallRequest, apiFetch } from './api.js';
+import { initRadar, prefersReducedMotion, setRadarOn, resetLastT } from './radar.js';
 
 // ---------- DOM ----------
 const {
@@ -182,18 +183,13 @@ function renderQueue(force = false) {
 
   updateChipCounts(filtered.length); // reuse the visible count we already computed
   renderTopTalkers(sorted);
-  radarUpdateTargets(sorted);
-  // Draw one fresh frame for the new targets. No-op while the sweep loop is
-  // already running; under reduced-motion (loop stopped) this redraws once so
-  // new/closed connection pins still update instead of freezing on stale data.
-  scheduleRadarFrame();
 }
 
 // Add the existing `.flash` class (flashFx keyframe) to rows whose PID wasn't
 // in the previous render. Skipped under prefers-reduced-motion and on the very
 // first render (prevPids === null) so we don't flash the whole list on load.
 function flashNewRows(sorted) {
-  if (S.prevPids === null || motionQuery?.matches) return;
+  if (S.prevPids === null || prefersReducedMotion()) return;
   for (const p of sorted) {
     // Flash a row when the process is new OR it reached a NEW remote address
     // (a new outbound connection is the event a security monitor must surface).
@@ -1173,362 +1169,6 @@ function drawGraph(svg, arr, color) {
   `;
 }
 
-// ---------- Radar canvas ----------
-const radarCanvas = document.getElementById('radar');
-const radarCtx = radarCanvas.getContext('2d');
-let RW = 0, RH = 0, CX = 0, CY = 0, RR = 0;
-const DPR = Math.max(1, window.devicePixelRatio || 1);
-let homeLat = null, homeLon = null;
-let radarTargets = []; // { lat, lng, pt, hot, label, bytes }
-let sweepAngle = -Math.PI / 2;
-let lastT = 0;
-let radarOn = true;
-// Pause the rAF loop when the radar isn't visible — tab hidden, scrolled
-// out of view, or container display:none. requestAnimationFrame is already
-// throttled to 1Hz when the tab is hidden, but the per-frame redraw
-// (rings, 72 ticks, home, sweep, arcs, targets) is still wasted work.
-let radarVisible = true;
-let radarTabVisible = !document.hidden;
-let radarRafScheduled = false;
-function radarShouldRun() { return radarOn && radarVisible && radarTabVisible; }
-function scheduleRadarFrame() {
-  if (radarRafScheduled || !radarShouldRun()) return;
-  radarRafScheduled = true;
-  requestAnimationFrame(radarFrame);
-}
-// Reduced-motion freezes the sweep and stops the rAF loop self-scheduling.
-// Re-check via this shared query (not a fresh matchMedia() per frame) and
-// restart the loop if the user toggles the OS setting OFF while the page is open.
-const motionQuery = window.matchMedia ? matchMedia('(prefers-reduced-motion: reduce)') : null;
-motionQuery?.addEventListener?.('change', () => { lastT = 0; scheduleRadarFrame(); });
-document.addEventListener('visibilitychange', () => {
-  radarTabVisible = !document.hidden;
-  lastT = 0; // avoid a huge dt jump on resume
-  scheduleRadarFrame();
-});
-
-function sizeRadar() {
-  const parent = radarCanvas.parentElement;
-  const rect = parent.getBoundingClientRect();
-  // Round to integer CSS pixels: the canvas has CSS width:100% which
-  // rounds to nearest device pixel on its own. If our internal RW/RH
-  // are sub-pixel, CX/CY drift off-center and targets appear to shift
-  // as the browser rescales each redraw.
-  const w = Math.floor(rect.width);
-  const h = Math.floor(rect.height);
-  if (w === RW && h === RH) return;
-  RW = w; RH = h;
-  const dpr = Math.max(1, window.devicePixelRatio || 1);
-  radarCanvas.width = Math.floor(RW * dpr);
-  radarCanvas.height = Math.floor(RH * dpr);
-  radarCanvas.style.width = RW + 'px';
-  radarCanvas.style.height = RH + 'px';
-  radarCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  CX = Math.round(RW / 2);
-  CY = Math.round(RH / 2);
-  RR = Math.floor(Math.min(RW, RH) / 2) - 24;
-  layoutBearings();
-  reprojectTargets();
-  reprojectCountryBorders();
-}
-window.addEventListener('resize', sizeRadar);
-// The radar-wrap size changes whenever the queue collapses, a modal
-// opens, the stage rows rebalance (stats strip wraps), or the window
-// resizes. Window resize alone misses all of those, which is what made
-// the canvas resolution go stale and the pinpoints "drift" relative to
-// the drawn rings. A ResizeObserver on the parent catches every case.
-if (typeof ResizeObserver !== 'undefined') {
-  new ResizeObserver(() => sizeRadar()).observe(radarCanvas.parentElement);
-}
-
-function layoutBearings() {
-  const wrap = document.getElementById('bearings');
-  if (!wrap) return;
-  wrap.innerHTML = '';
-  const cardinals = [
-    { l: 'N 000', a: -Math.PI / 2 },
-    { l: 'NE 045', a: -Math.PI / 4 },
-    { l: 'E 090', a: 0 },
-    { l: 'SE 135', a: Math.PI / 4 },
-    { l: 'S 180', a: Math.PI / 2 },
-    { l: 'SW 225', a: 3 * Math.PI / 4 },
-    { l: 'W 270', a: Math.PI },
-    { l: 'NW 315', a: -3 * Math.PI / 4 },
-  ];
-  for (const c of cardinals) {
-    const el = document.createElement('span');
-    el.textContent = c.l;
-    const r = RR + 20;
-    el.style.left = (CX + Math.cos(c.a) * r) + 'px';
-    el.style.top = (CY + Math.sin(c.a) * r) + 'px';
-    wrap.appendChild(el);
-  }
-}
-
-function project(lat, lng) {
-  if (homeLat === null) return { x: CX, y: CY, c: 0 };
-  const φ1 = homeLat * Math.PI / 180;
-  const λ1 = homeLon * Math.PI / 180;
-  const φ2 = lat * Math.PI / 180;
-  const λ2 = lng * Math.PI / 180;
-  const c = Math.acos(Math.max(-1, Math.min(1, Math.sin(φ1) * Math.sin(φ2) + Math.cos(φ1) * Math.cos(φ2) * Math.cos(λ2 - λ1))));
-  const y = Math.sin(λ2 - λ1) * Math.cos(φ2);
-  const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(λ2 - λ1);
-  const θ = Math.atan2(y, x);
-  const rr = (c / Math.PI) * RR * 1.15;
-  return { x: CX + rr * Math.sin(θ), y: CY - rr * Math.cos(θ), c };
-}
-
-// ---- Country borders ----
-// Lazy-loaded and cached. Each country is stored as an array of rings,
-// each ring is an array of [lon, lat] pairs. We project & stroke these
-// every radar frame. The azimuthal-equidistant projection degenerates
-// near the antipode, so segments whose endpoints lie more than ~170°
-// apart from the home point are skipped to avoid ugly long slashes.
-let countryRings = null; // Array<Array<[lng, lat]>> | null (raw lon/lat)
-let projectedCountryRings = null; // cached Array<Array<{x,y,c}>>; rebuilt only on home/size change
-(async () => {
-  try {
-    // Pinned to an exact version (the topojson-client <script> is SRI-pinned to
-    // @3.1.0). A fetch() can't carry SRI, so this is the practical hardening:
-    // an immutable, reproducible URL. CSP connect-src already limits the host.
-    const res = await fetch('https://unpkg.com/world-atlas@2.0.2/countries-110m.json');
-    if (!res.ok) return;
-    const topo = await res.json();
-    const topojson = window.topojson;
-    if (!topojson || !topo?.objects?.countries) return;
-    const geo = topojson.feature(topo, topo.objects.countries);
-    const rings = [];
-    for (const feat of geo.features) {
-      const geom = feat.geometry;
-      if (!geom) continue;
-      if (geom.type === 'Polygon') {
-        for (const ring of geom.coordinates) rings.push(ring);
-      } else if (geom.type === 'MultiPolygon') {
-        for (const poly of geom.coordinates) {
-          for (const ring of poly) rings.push(ring);
-        }
-      }
-    }
-    countryRings = rings;
-    reprojectCountryBorders();
-    scheduleRadarFrame();
-  } catch {
-    // CDN unavailable — radar just renders without borders.
-  }
-})();
-
-// Rebuild the projected-border cache. The azimuthal projection depends only on
-// the home point and radar size, so we re-project on home/size change — not on
-// every frame; drawCountryBorders then just strokes the cached points.
-function reprojectCountryBorders() {
-  if (!countryRings || homeLat === null || RR <= 0) { projectedCountryRings = null; return; }
-  projectedCountryRings = countryRings.map((ring) => ring.map(([lon, lat]) => project(lat, lon)));
-}
-
-function drawCountryBorders(ctx) {
-  if (!projectedCountryRings) return;
-  ctx.save();
-  // Clip to radar disk so overshoots don't bleed outside the ring.
-  ctx.beginPath();
-  ctx.arc(CX, CY, RR * 1.06, 0, Math.PI * 2);
-  ctx.clip();
-  ctx.strokeStyle = 'oklch(0.40 0.01 260 / 0.55)';
-  ctx.lineWidth = 0.6;
-  const CUTOFF = Math.PI * 0.92; // skip near-antipode segments
-  for (const ring of projectedCountryRings) {
-    ctx.beginPath();
-    let prev = null;
-    for (const p of ring) {
-      if (p.c > CUTOFF) { prev = null; continue; }
-      if (prev === null) ctx.moveTo(p.x, p.y);
-      else ctx.lineTo(p.x, p.y);
-      prev = p;
-    }
-    ctx.stroke();
-  }
-  ctx.restore();
-}
-
-function reprojectTargets() {
-  for (const t of radarTargets) t.pt = project(t.lat, t.lng);
-}
-
-function radarSetHome(lat, lon) {
-  if (typeof lat !== 'number' || typeof lon !== 'number') return;
-  homeLat = lat; homeLon = lon;
-  reprojectTargets();
-  reprojectCountryBorders();
-}
-
-function radarUpdateTargets(sortedProcs) {
-  const seen = new Map(); // "lat,lng" -> target
-  for (const p of sortedProcs) {
-    for (const c of p.connections) {
-      const g = c.geo;
-      if (!g || g.country === 'Local' || (!g.lat && !g.lon)) continue;
-      const key = `${g.lat.toFixed(2)},${g.lon.toFixed(2)}`;
-      if (!seen.has(key)) {
-        seen.set(key, {
-          lat: g.lat, lng: g.lon,
-          pt: project(g.lat, g.lng),
-          hot: false,
-          bytes: 0,
-          label: `${g.countryCode || ''} · ${p.processName}`,
-          conns: 0,
-        });
-      }
-      const t = seen.get(key);
-      const live = liveTraffic.get(c.trafficKey);
-      t.bytes += (live ? live.bytesIn : (c.bytesIn || 0)) + (live ? live.bytesOut : (c.bytesOut || 0));
-      t.conns += 1;
-    }
-  }
-  // mark the top 3 by byte count as hot
-  const arr = [...seen.values()];
-  arr.sort((a, b) => b.bytes - a.bytes);
-  arr.forEach((t, i) => { t.hot = i < 3 && t.bytes > 0; });
-  radarTargets = arr;
-}
-
-function radarFrame(ts) {
-  radarRafScheduled = false;
-  if (!radarShouldRun()) return; // stop the loop; scheduleRadarFrame() resumes it
-  // Honor reduced-motion: draw one static frame, don't run the sweep loop.
-  const reduceMotion = !!motionQuery?.matches;
-  if (!reduceMotion) {
-    requestAnimationFrame(radarFrame);
-    radarRafScheduled = true;
-  }
-  if (!lastT) lastT = ts;
-  const dt = (ts - lastT) / 1000; lastT = ts;
-  // Keep lastT current even under reduced-motion (avoids a dt jump if motion
-  // is re-enabled), but freeze the sweep so refreshes don't visibly rotate it.
-  if (!reduceMotion) {
-    sweepAngle += dt * (Math.PI * 2 / 7);
-    if (sweepAngle > Math.PI) sweepAngle -= Math.PI * 2;
-  }
-
-  const ctx = radarCtx;
-  ctx.clearRect(0, 0, RW, RH);
-  if (RR <= 0) return;
-
-  // vignette
-  const g = ctx.createRadialGradient(CX, CY, RR * 0.1, CX, CY, RR * 1.1);
-  g.addColorStop(0, 'rgba(255,255,255,0.02)');
-  g.addColorStop(1, 'rgba(0,0,0,0)');
-  ctx.fillStyle = g; ctx.fillRect(0, 0, RW, RH);
-
-  // country borders (behind rings)
-  drawCountryBorders(ctx);
-
-  // rings
-  ctx.strokeStyle = 'oklch(0.32 0.006 260)'; ctx.lineWidth = 1;
-  for (const f of [0.25, 0.5, 0.75, 1.0]) {
-    ctx.beginPath(); ctx.arc(CX, CY, RR * f, 0, Math.PI * 2); ctx.stroke();
-  }
-  ctx.strokeStyle = 'oklch(0.50 0.006 260)';
-  ctx.beginPath(); ctx.arc(CX, CY, RR * 1.08, 0, Math.PI * 2); ctx.stroke();
-
-  // crosshair
-  ctx.strokeStyle = 'oklch(0.25 0.006 260)'; ctx.setLineDash([2, 4]);
-  ctx.beginPath();
-  ctx.moveTo(CX - RR * 1.05, CY); ctx.lineTo(CX + RR * 1.05, CY);
-  ctx.moveTo(CX, CY - RR * 1.05); ctx.lineTo(CX, CY + RR * 1.05);
-  const d = RR * 1.05 / Math.SQRT2;
-  ctx.moveTo(CX - d, CY - d); ctx.lineTo(CX + d, CY + d);
-  ctx.moveTo(CX - d, CY + d); ctx.lineTo(CX + d, CY - d);
-  ctx.stroke(); ctx.setLineDash([]);
-
-  // ticks
-  ctx.strokeStyle = 'oklch(0.35 0.006 260)';
-  for (let a = 0; a < 360; a += 5) {
-    const rad = a * Math.PI / 180;
-    const big = a % 15 === 0;
-    const r1 = RR * 1.08, r2 = RR * (big ? 1.12 : 1.10);
-    ctx.beginPath();
-    ctx.moveTo(CX + Math.cos(rad) * r1, CY + Math.sin(rad) * r1);
-    ctx.lineTo(CX + Math.cos(rad) * r2, CY + Math.sin(rad) * r2);
-    ctx.stroke();
-  }
-
-  // home
-  ctx.fillStyle = '#fff';
-  ctx.beginPath(); ctx.arc(CX, CY, 3.5, 0, Math.PI * 2); ctx.fill();
-  ctx.strokeStyle = 'rgba(255,255,255,0.4)';
-  ctx.beginPath(); ctx.arc(CX, CY, 8 + Math.sin(ts / 400) * 2, 0, Math.PI * 2); ctx.stroke();
-
-  // sweep cone + line
-  const signal = 'oklch(0.74 0.25 340)';
-  const grad = ctx.createRadialGradient(CX, CY, 0, CX, CY, RR * 1.08);
-  grad.addColorStop(0, 'rgba(0,0,0,0)');
-  grad.addColorStop(1, 'oklch(0.74 0.25 340 / 0.35)');
-  ctx.save(); ctx.translate(CX, CY); ctx.rotate(sweepAngle);
-  ctx.beginPath(); ctx.moveTo(0, 0);
-  const spread = Math.PI / 5;
-  ctx.arc(0, 0, RR * 1.08, -spread, 0); ctx.closePath();
-  ctx.fillStyle = grad; ctx.fill();
-  ctx.restore();
-
-  ctx.save(); ctx.translate(CX, CY); ctx.rotate(sweepAngle);
-  ctx.strokeStyle = signal; ctx.lineWidth = 1.4; ctx.shadowColor = signal; ctx.shadowBlur = 10;
-  ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(RR * 1.08, 0); ctx.stroke();
-  ctx.shadowBlur = 0; ctx.restore();
-
-  // arcs
-  ctx.strokeStyle = 'oklch(0.84 0.11 230 / 0.18)'; ctx.lineWidth = 0.8;
-  for (const t of radarTargets) {
-    ctx.beginPath();
-    ctx.moveTo(CX, CY);
-    const mx = (CX + t.pt.x) / 2, my = (CY + t.pt.y) / 2;
-    const ndx = -(t.pt.y - CY), ndy = (t.pt.x - CX);
-    const ln = Math.hypot(ndx, ndy) || 1;
-    const k = 0.18;
-    const cx2 = mx + ndx / ln * Math.hypot(t.pt.x - CX, t.pt.y - CY) * k;
-    const cy2 = my + ndy / ln * Math.hypot(t.pt.x - CX, t.pt.y - CY) * k;
-    ctx.quadraticCurveTo(cx2, cy2, t.pt.x, t.pt.y);
-    ctx.stroke();
-  }
-
-  // targets
-  for (const t of radarTargets) {
-    const { x, y } = t.pt;
-    const ang = Math.atan2(y - CY, x - CX);
-    const rel = (sweepAngle - ang + Math.PI * 2) % (Math.PI * 2);
-    const tail = Math.PI / 2.5;
-    const illum = rel < tail ? 1 - rel / tail : 0;
-    const baseAlpha = 0.55 + illum * 0.45;
-    const color = t.hot ? 'oklch(0.74 0.25 340)' : 'oklch(0.84 0.11 230)';
-    ctx.fillStyle = color; ctx.globalAlpha = baseAlpha;
-    ctx.beginPath(); ctx.arc(x, y, t.hot ? 2.8 : 2.2, 0, Math.PI * 2); ctx.fill();
-    if (illum > 0.2) {
-      ctx.globalAlpha = illum * 0.6;
-      ctx.strokeStyle = color; ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.arc(x, y, 6 + illum * 6, 0, Math.PI * 2); ctx.stroke();
-    }
-    ctx.globalAlpha = 1;
-  }
-}
-sizeRadar();
-scheduleRadarFrame();
-
-// Watch whether the radar is actually on-screen (tweaks can hide it via
-// `display:none`, the queue can push it below the fold, etc.). Combined
-// with the visibilitychange listener, this means the canvas redraws only
-// when pixels on screen actually depend on it.
-if (typeof IntersectionObserver !== 'undefined') {
-  const io = new IntersectionObserver((entries) => {
-    for (const e of entries) {
-      radarVisible = e.isIntersecting;
-      if (radarVisible) {
-        lastT = 0;
-        scheduleRadarFrame();
-      }
-    }
-  }, { threshold: 0 });
-  io.observe(radarCanvas);
-}
-
 // ---------- System health (live from /api/system-health) ----------
 async function refreshSystemHealth() {
   try {
@@ -1571,8 +1211,7 @@ function applyTweaks() {
   document.body.classList.toggle('density-compact', TWEAKS.density === 'compact');
   document.body.classList.toggle('density-comfortable', TWEAKS.density === 'comfortable');
   document.body.classList.toggle('radar-off', !TWEAKS.radar);
-  radarOn = TWEAKS.radar !== false;
-  if (radarOn) { lastT = 0; scheduleRadarFrame(); }
+  setRadarOn(TWEAKS.radar !== false);
   for (const seg of document.querySelectorAll('.tweaks .seg')) {
     const k = seg.dataset.key;
     for (const b of seg.querySelectorAll('button')) b.classList.toggle('on', b.dataset.v === TWEAKS[k]);
@@ -1616,17 +1255,18 @@ refreshNowBtn.addEventListener('click', async () => {
 footRefresh.textContent = refreshSelect.options[refreshSelect.selectedIndex].textContent;
 footSort.textContent = sortSelect.value;
 
-// ---------- Bus subscriptions (temporary — render fns move in Tasks 6/7/8/10) ----------
+// ---------- Bus subscriptions (temporary — render fns move in Tasks 7/8/10) ----------
 // api.js emits these events instead of calling render fns directly, breaking
 // the circular-import hazard. Once each render fn moves to its own module,
 // it subscribes itself and this subscription is deleted.
 on('data:changed', () => renderQueue());
 on('blocked:changed', () => renderBlockedPanel());
-on('host:changed', ({ lat, lon }) => radarSetHome(lat, lon));
+// host:changed is now owned by radar.js (registered inside initRadar())
 
 // ---------- Init ----------
 statusText.classList.add('wait');
 statusText.textContent = 'connecting…';
+initRadar();
 connectTrafficStream();
 refreshAll({ fresh: true });
 scheduleRefresh();
