@@ -10,6 +10,27 @@ const CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
 let lastBatchTime = 0;
 const MIN_BATCH_INTERVAL = 1500; // ms between batch requests
 
+// Serialize all outbound ip-api.com requests through one chain so concurrent
+// callers can't both clear the rate-limit gate at once. Mirrors block-store's
+// serialize(). Spacing is reserved BEFORE awaiting the fetch (set lastBatchTime
+// to the scheduled send time), not after, so the next op waits the full window.
+let geoChain: Promise<unknown> = Promise.resolve();
+function serializeGeo<T>(op: () => Promise<T>): Promise<T> {
+  const run = geoChain.then(async () => {
+    const elapsed = Date.now() - lastBatchTime;
+    if (elapsed < MIN_BATCH_INTERVAL) {
+      await new Promise((r) => setTimeout(r, MIN_BATCH_INTERVAL - elapsed));
+    }
+    lastBatchTime = Date.now();
+    return op();
+  });
+  geoChain = run.catch(() => {});
+  return run;
+}
+
+// Test-only handle (not part of the public API).
+export const __testSerialize = serializeGeo;
+
 function isPrivateIP(ip: string): boolean {
   if (ip.startsWith('10.')) return true;
   if (ip.startsWith('192.168.')) return true;
@@ -50,9 +71,11 @@ export async function lookupSingleIP(ip: string): Promise<GeoInfo | null> {
   const cached = cache.get(ip);
   if (cached && Date.now() - cached.timestamp < CACHE_TTL) return cached.data;
   try {
-    const res = await fetch(`http://ip-api.com/json/${ip}?fields=status,country,countryCode,city,isp,lat,lon`, {
-      signal: AbortSignal.timeout(5000),
-    });
+    const res = await serializeGeo(() =>
+      fetch(`http://ip-api.com/json/${ip}?fields=status,country,countryCode,city,isp,lat,lon`, {
+        signal: AbortSignal.timeout(5000),
+      })
+    );
     if (!res.ok) return null;
     const d = await res.json() as { status: string; country?: string; countryCode?: string; city?: string; isp?: string; lat?: number; lon?: number };
     if (d.status !== 'success') return null;
@@ -94,20 +117,15 @@ export async function lookupIPs(ips: string[]): Promise<Map<string, GeoInfo>> {
   }
 
   for (const batch of batches) {
-    // Rate limit: wait out the remaining interval rather than dropping the lookup
-    const elapsed = Date.now() - lastBatchTime;
-    if (elapsed < MIN_BATCH_INTERVAL) {
-      await new Promise((r) => setTimeout(r, MIN_BATCH_INTERVAL - elapsed));
-    }
-
     try {
-      lastBatchTime = Date.now();
-      const response = await fetch('http://ip-api.com/batch?fields=status,country,countryCode,city,isp,lat,lon,query', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(batch),
-        signal: AbortSignal.timeout(5000),
-      });
+      const response = await serializeGeo(() =>
+        fetch('http://ip-api.com/batch?fields=status,country,countryCode,city,isp,lat,lon,query', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(batch),
+          signal: AbortSignal.timeout(5000),
+        })
+      );
 
       if (!response.ok) continue;
 
