@@ -3,62 +3,20 @@
    ============================================================ */
 
 import { escapeHtml, isIPv6, isLocalhost, isPrivateIP, flag, formatBytes, fmtBytes, relTime, formatTime, looksLikeIP } from './util.js';
+import { el } from './dom.js';
 
 // ---------- DOM ----------
-const queueEl = document.getElementById('queue');
-const qEl = document.getElementById('searchInput');
-const sortSelect = document.getElementById('sortSelect');
-const chipsEl = document.getElementById('chips');
-const blockedCountEl = document.getElementById('blockedCount');
-const statusText = document.getElementById('statusText');
-const qToggleBtn = document.getElementById('qToggle');
-const qToggleIcon = document.getElementById('qToggleIcon');
-const refreshSelect = document.getElementById('refreshSelect');
-const refreshNowBtn = document.getElementById('refreshNowBtn');
-
-// stage/health
-const tRx = document.getElementById('tRx');
-const tTx = document.getElementById('tTx');
-const gRx = document.getElementById('gRx');
-const gTx = document.getElementById('gTx');
-const dProc = document.getElementById('dProc');
-const dProcSys = document.getElementById('dProcSys');
-const dProcUsr = document.getElementById('dProcUsr');
-const dConn = document.getElementById('dConn');
-const dConnSub = document.getElementById('dConnSub');
-const dCtry = document.getElementById('dCtry');
-const dCtrySub = document.getElementById('dCtrySub');
-const talkersListEl = document.getElementById('talkersList');
-const hCPU = document.getElementById('hCPU');
-const hCPUbar = document.getElementById('hCPUbar');
-const hMem = document.getElementById('hMem');
-const hMembar = document.getElementById('hMembar');
-const hLoad = document.getElementById('hLoad');
-
-// blocked panel
-const blockedListEl = document.getElementById('blockedList');
-const blockedSearch = document.getElementById('blockedSearch');
-const blockedCntBig = document.getElementById('blockedCntBig');
-const blockedExport = document.getElementById('blockedExport');
-const blockedAdd = document.getElementById('blockedAdd');
-const blockedHistoryBtn = document.getElementById('blockedHistory');
-
-// foot
-const footRefresh = document.getElementById('footRefresh');
-const footSort = document.getElementById('footSort');
-const footTz = document.getElementById('footTz');
-const footBlocked = document.getElementById('footBlocked');
-
-// masthead
-const clockT = document.getElementById('clockT');
-const clockD = document.getElementById('clockD');
-const hostHostname = document.getElementById('hostHostname');
-const hostLocalIP = document.getElementById('hostLocalIP');
-const hostPublicIP = document.getElementById('hostPublicIP');
-const hostLocation = document.getElementById('hostLocation');
-const hostISP = document.getElementById('hostISP');
-const queueISP = document.getElementById('queueISP');
-const queueGeo = document.getElementById('queueGeo');
+const {
+  queueEl, qEl, sortSelect, chipsEl, blockedCountEl, statusText,
+  qToggleBtn, qToggleIcon, refreshSelect, refreshNowBtn,
+  tRx, tTx, gRx, gTx,
+  dProc, dProcSys, dProcUsr, dConn, dConnSub, dCtry, dCtrySub,
+  talkersListEl, hCPU, hCPUbar, hMem, hMembar, hLoad,
+  blockedListEl, blockedSearch, blockedCntBig, blockedExport, blockedAdd, blockedHistoryBtn,
+  footRefresh, footSort, footTz, footBlocked,
+  clockT, clockD, hostHostname, hostLocalIP, hostPublicIP, hostLocation, hostISP,
+  queueISP, queueGeo,
+} = el;
 
 // ---------- State ----------
 const expandedPids = new Set();
