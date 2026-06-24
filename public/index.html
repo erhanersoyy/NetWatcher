@@ -3,11 +3,13 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://unpkg.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'">
   <title>NetWatcher</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
+  <script src="https://unpkg.com/topojson-client@3.1.0/dist/topojson-client.min.js" integrity="sha384-Ukv1p/xTma6P4/2bY5KzWBw+ydSpXmhCMtyciIQVDJ1RmOxtCYNMF1uXT9T63H67" crossorigin="anonymous"></script>
 </head>
 <body class="density-compact">
 
@@ -81,7 +83,6 @@
       <div class="queue-head">
         <div class="title">
           <h2>Process list</h2>
-          <span class="n mono" id="procCount">0 visible</span>
         </div>
 
         <div class="queue-netinfo" id="queueNetInfo">
@@ -167,8 +168,6 @@
             <div class="hbar"><span id="hCPUbar" style="background:var(--ice)"></span></div>
             <div class="line"><span class="k">Memory</span><span class="v" id="hMem">—</span></div>
             <div class="hbar"><span id="hMembar" style="background:var(--purple)"></span></div>
-            <div class="line"><span class="k">Temp</span><span class="v hot" id="hTemp">—</span></div>
-            <div class="hbar"><span id="hTempbar" style="background:var(--signal)"></span></div>
             <div class="line"><span class="k">Load avg</span><span class="v" id="hLoad">—</span></div>
           </div>
         </div>

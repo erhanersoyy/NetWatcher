@@ -127,7 +127,7 @@ code { font-family: var(--mono); font-size: inherit; }
 /* ---------- Main grid ---------- */
 .main {
   display: grid;
-  grid-template-columns: 720px 1fr;
+  grid-template-columns: 880px 1fr;
   height: calc(100vh - 69px - 28px);
   transition: grid-template-columns .28s cubic-bezier(.4,0,.2,1);
 }
@@ -378,6 +378,7 @@ body.queue-collapsed .q-collapsed-rail { display: flex; }
 }
 .conn .c .meta .rx { color: var(--ice); }
 .conn .c .meta .tx { color: var(--signal); }
+.conn .c .meta .isp { color: var(--ink-dim); max-width: 20ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .conn .c .meta .flag { margin-right: 3px; }
 .conn .c .meta .blocked-tag {
   color: var(--red); border: 1px solid oklch(0.70 0.20 25 / 0.35);
@@ -402,23 +403,23 @@ body.queue-collapsed .q-collapsed-rail { display: flex; }
 .stage {
   position: relative;
   display: grid;
-  grid-template-rows: 220px auto auto minmax(200px, 1fr);
+  grid-template-rows: 300px auto auto minmax(200px, 1fr);
   background: var(--bg);
   min-width: 0; min-height: 0;
   overflow: hidden;
 }
 .radar-wrap {
-  grid-row: 1; min-height: 0; height: 220px;
+  grid-row: 1; min-height: 0; height: 300px;
   position: relative; overflow: hidden;
   display: flex; align-items: center; justify-content: center;
 }
 @media (min-height: 760px) {
-  .stage { grid-template-rows: 260px auto auto minmax(220px, 1fr); }
-  .radar-wrap { height: 260px; }
+  .stage { grid-template-rows: 360px auto auto minmax(220px, 1fr); }
+  .radar-wrap { height: 360px; }
 }
 @media (min-height: 900px) {
-  .stage { grid-template-rows: 320px auto auto minmax(260px, 1fr); }
-  .radar-wrap { height: 320px; }
+  .stage { grid-template-rows: 440px auto auto minmax(260px, 1fr); }
+  .radar-wrap { height: 440px; }
 }
 
 .stage .reg {
@@ -589,7 +590,7 @@ body.radar-off .radar-wrap { background: repeating-linear-gradient(45deg, transp
 .blocked-row:hover { background: var(--bg-lift); }
 .blocked-row .ip { color: var(--ink); font-weight: 500; }
 .blocked-row .cc { color: var(--ink-dim); }
-.blocked-row .host { color: var(--ice); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.blocked-row .isp { color: var(--ice); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .blocked-row .when { color: var(--ink-dim); font-size: 10px; }
 .blocked-row .un {
   font-family: var(--mono); font-size: 10px; letter-spacing: .1em; text-transform: uppercase;

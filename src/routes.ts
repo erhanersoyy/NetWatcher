@@ -9,8 +9,8 @@ import { subscribeTrafficStream, getLatestTrafficStats } from './traffic-stream.
 import { getProcessMeta } from './process-info.js';
 import { killProcess } from './process-kill.js';
 import { vtLookup } from './virustotal.js';
-import { blockIP, unblockIP, getBlockedIPs } from './firewall.js';
-import { getBlockHistory, deleteBlockHistoryRow } from './block-store.js';
+import { blockIP, unblockIP, getBlockedIPs, getBlockedIPsOrNull } from './firewall.js';
+import { getBlockHistory, deleteBlockHistoryRow, reconcileActive } from './block-store.js';
 import { getSystemHealth } from './system-health.js';
 import type { ProcessInfo, EnrichedConnection, HostInfo } from './types.js';
 
@@ -192,6 +192,13 @@ router.get('/api/blocked', async (_req, res) => {
 });
 
 router.get('/api/block-history', async (_req, res) => {
+  // Before returning, reconcile the persisted store against live pfctl.
+  // If we get an authoritative snapshot, close out any "active" records
+  // that pfctl no longer enforces (drift after reboot / external flush).
+  // If we can't read pfctl (sudo timestamp not primed), skip — we don't
+  // want to mass-unblock on a false negative.
+  const live = await getBlockedIPsOrNull();
+  if (live !== null) await reconcileActive(live);
   const data = await getBlockHistory();
   res.json(data);
 });

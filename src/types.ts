@@ -55,6 +55,8 @@ export interface ProcessInfo {
 export interface BlockRecord {
   ip: string;
   country: string | null;
+  countryCode?: string | null;
+  isp?: string | null;
   blockedAt: number;
 }
 
@@ -63,6 +65,8 @@ export interface BlockEvent {
   action: 'block' | 'unblock';
   at: number;
   country?: string | null;
+  countryCode?: string | null;
+  isp?: string | null;
 }
 
 export interface BlockHistoryResponse {

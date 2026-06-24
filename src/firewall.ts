@@ -155,9 +155,13 @@ export async function blockIP(ip: string, password: string): Promise<{ success: 
     void (async () => {
       try {
         const geo = await lookupSingleIP(ip);
-        await recordBlock(ip, geo?.country ?? null);
+        await recordBlock(ip, {
+          country: geo?.country ?? null,
+          countryCode: geo?.countryCode ?? null,
+          isp: geo?.isp ?? null,
+        });
       } catch {
-        await recordBlock(ip, null).catch(() => {});
+        await recordBlock(ip, { country: null }).catch(() => {});
       }
     })();
     return { success: true, message: `Blocked ${ip}` };
@@ -193,12 +197,29 @@ export async function unblockIP(ip: string, password: string): Promise<{ success
   }
 }
 
-export async function getBlockedIPs(): Promise<string[]> {
-  // Read-only; try non-interactively. If sudo timestamp isn't primed, return [].
+// Read-only view of live pfctl state. Distinguishes three outcomes:
+//   - string[]  → authoritative snapshot (possibly empty)
+//   - null      → we couldn't read pfctl (sudo timestamp not primed, pfctl
+//                 hard error, timeout). State is unknown; callers must NOT
+//                 treat this as "no blocks" — that's what the legacy wrapper
+//                 did and it caused silent reconciliation drift.
+// "Table does not exist" means the anchor was never primed with a block in
+// the current pf session → that IS authoritative: zero active blocks.
+export async function getBlockedIPsOrNull(): Promise<string[] | null> {
   try {
     const { stdout } = await execFileAsync('sudo', ['-n', '/sbin/pfctl', '-a', ANCHOR, '-t', TABLE, '-T', 'show'], { timeout: 5000 });
     return stdout.split('\n').map(l => l.trim()).filter(Boolean);
-  } catch {
-    return [];
+  } catch (err) {
+    const e = err as { stderr?: string; message?: string } | null;
+    const text = `${e?.stderr ?? ''}\n${e?.message ?? ''}`;
+    if (/Table does not exist/i.test(text)) return [];
+    return null;
   }
+}
+
+// Legacy wrapper for callers that only need the list and are OK treating
+// "unknown" as empty (e.g. the /api/blocked response, which is by contract
+// just a best-effort snapshot for the UI header count).
+export async function getBlockedIPs(): Promise<string[]> {
+  return (await getBlockedIPsOrNull()) ?? [];
 }

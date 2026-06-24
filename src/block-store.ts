@@ -46,12 +46,18 @@ function serialize<T>(op: () => Promise<T>): Promise<T> {
   return next;
 }
 
-export function recordBlock(ip: string, country: string | null): Promise<void> {
+export function recordBlock(
+  ip: string,
+  meta: { country: string | null; countryCode?: string | null; isp?: string | null },
+): Promise<void> {
   return serialize(async () => {
     const store = await readStore();
     const at = Date.now();
-    store.active[ip] = { ip, country, blockedAt: at };
-    store.history.push({ ip, action: 'block', at, country });
+    const country = meta.country ?? null;
+    const countryCode = meta.countryCode ?? null;
+    const isp = meta.isp ?? null;
+    store.active[ip] = { ip, country, countryCode, isp, blockedAt: at };
+    store.history.push({ ip, action: 'block', at, country, countryCode, isp });
     await writeStore(store);
   });
 }
@@ -61,7 +67,14 @@ export function recordUnblock(ip: string): Promise<void> {
     const store = await readStore();
     const prev = store.active[ip];
     delete store.active[ip];
-    store.history.push({ ip, action: 'unblock', at: Date.now(), country: prev?.country ?? null });
+    store.history.push({
+      ip,
+      action: 'unblock',
+      at: Date.now(),
+      country: prev?.country ?? null,
+      countryCode: prev?.countryCode ?? null,
+      isp: prev?.isp ?? null,
+    });
     await writeStore(store);
   });
 }
@@ -96,6 +109,37 @@ export function deleteBlockHistoryRow(
     const removed = before - store.history.length;
     if (removed > 0) await writeStore(store);
     return { success: true, removed };
+  });
+}
+
+// Bring the persisted `active` map in line with a fresh pfctl snapshot.
+// Any IP we think is active but pfctl doesn't have is treated as an
+// implicit unblock (reboot, external `pfctl -F all`, anchor never
+// re-loaded, etc.) — we append an unblock event so the history timeline
+// stays coherent rather than claiming a block that isn't actually in
+// effect. No-op when nothing drifted. Callers must only invoke this
+// with an AUTHORITATIVE snapshot (never null/unknown).
+export function reconcileActive(livePfctlIPs: string[]): Promise<{ removed: string[] }> {
+  return serialize(async () => {
+    const live = new Set(livePfctlIPs);
+    const store = await readStore();
+    const orphans = Object.keys(store.active).filter((ip) => !live.has(ip));
+    if (orphans.length === 0) return { removed: [] };
+    const at = Date.now();
+    for (const ip of orphans) {
+      const prev = store.active[ip];
+      delete store.active[ip];
+      store.history.push({
+        ip,
+        action: 'unblock',
+        at,
+        country: prev?.country ?? null,
+        countryCode: prev?.countryCode ?? null,
+        isp: prev?.isp ?? null,
+      });
+    }
+    await writeStore(store);
+    return { removed: orphans };
   });
 }
 
