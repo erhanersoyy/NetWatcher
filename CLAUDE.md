@@ -14,8 +14,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `pnpm typecheck` — run after a series of edits
 - `pnpm build` — compile TS to `dist/`
 - `pnpm start` — run compiled build
+- `pnpm test` — run unit tests (Node's built-in runner over `src/**/*.test.ts`)
 
-No test runner or linter is configured yet.
+No linter is configured yet.
 
 ## Architecture
 
@@ -52,7 +53,7 @@ Single-process Node.js server: Express backend serves a static vanilla JS fronte
 
 - **ip-api.com** — Free tier, 45 req/min, no API key. Batch endpoint is critical for staying under the limit.
 - **ipify.org** — Public IP detection, 5s timeout
-- **unpkg.com CDN** — `topojson-client` (decodes the bundled world TopoJSON into coastline paths for the radar)
+- **unpkg.com CDN** — `topojson-client@3.1.0` (SRI-pinned `<script>`) plus the `world-atlas@2.0.2` countries TopoJSON, both fetched at runtime; `topojson-client` decodes the atlas into the radar's coastline paths. Radar renders without borders if the CDN is unavailable.
 
 ## Code Style
 
