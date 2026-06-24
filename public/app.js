@@ -256,8 +256,10 @@ function renderQueue(force = false) {
     queueEl.innerHTML = sorted.map((p, i) => renderProcRow(p, i)).join('');
     flashNewRows(sorted);
   }
-  // Remember which PIDs we just drew so the next render can flash arrivals.
-  prevPids = new Set(sorted.map((p) => p.pid));
+  // Remember PIDs from the full dataset (not just the filtered view) so the
+  // next render flashes only genuinely-new connections — not rows merely
+  // revealed by toggling a filter or clearing the search.
+  prevPids = new Set((lastData || []).map((p) => p.pid));
 
   // update stats strip
   const totalConns = sorted.reduce((s, p) => s + p.connections.length, 0);
@@ -826,7 +828,7 @@ function killProcessAction(pid, name, isSystem, btn) {
   const message = isSystem
     ? `"${name}" is a system process required for system stability. Are you sure you want to kill it?`
     : `Kill "${name}" (PID ${pid})? This sends SIGTERM and can't be undone.`;
-  showConfirmDialog(message, () => doKill(pid, unlock), unlock);
+  showConfirmDialog(message, () => doKill(pid, unlock), unlock, isSystem ? 'Kill Anyway' : 'Kill Process');
 }
 async function doKill(pid, unlock) {
   try {
@@ -886,7 +888,7 @@ function trapFocus(overlay) {
   };
 }
 
-function showConfirmDialog(message, onConfirm, onCancel) {
+function showConfirmDialog(message, onConfirm, onCancel, confirmLabel = 'Kill Anyway') {
   const existing = document.getElementById('confirmOverlay');
   if (existing) existing.remove();
   const overlay = document.createElement('div');
@@ -900,7 +902,7 @@ function showConfirmDialog(message, onConfirm, onCancel) {
       <div class="confirm-message">${escapeHtml(message)}</div>
       <div class="confirm-actions">
         <button class="confirm-btn confirm-cancel">Cancel</button>
-        <button class="confirm-btn confirm-kill">Kill Anyway</button>
+        <button class="confirm-btn confirm-kill">${escapeHtml(confirmLabel)}</button>
       </div>
     </div>
   `;
