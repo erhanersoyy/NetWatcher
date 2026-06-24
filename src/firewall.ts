@@ -218,10 +218,3 @@ export async function getBlockedIPsOrNull(): Promise<string[] | null> {
     return null;
   }
 }
-
-// Legacy wrapper for callers that only need the list and are OK treating
-// "unknown" as empty (e.g. the /api/blocked response, which is by contract
-// just a best-effort snapshot for the UI header count).
-export async function getBlockedIPs(): Promise<string[]> {
-  return (await getBlockedIPsOrNull()) ?? [];
-}

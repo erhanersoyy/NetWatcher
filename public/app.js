@@ -277,6 +277,10 @@ function renderQueue(force = false) {
 
   renderTopTalkers(sorted);
   radarUpdateTargets(sorted);
+  // Draw one fresh frame for the new targets. No-op while the sweep loop is
+  // already running; under reduced-motion (loop stopped) this redraws once so
+  // new/closed connection pins still update instead of freezing on stale data.
+  scheduleRadarFrame();
 }
 
 function renderProcRow(proc, i) {
@@ -559,13 +563,17 @@ async function fetchBlockedIPs() {
       });
     }
   } catch { /* silent */ }
-  // When pfctl is readable it is authoritative — trust it alone, so an IP
-  // unblocked elsewhere drops off immediately. When unknown (sudo timestamp
-  // not primed → 503), fall back to the persisted active list so the panel
-  // isn't empty just because sudo expired.
-  blockedIPs = livePfctl !== null
-    ? new Set(livePfctl)
-    : new Set(blockedMeta.keys());
+  // Display source = the persisted active list (stable: it survives the common
+  // case where pfctl is unreadable because the sudo timestamp lapsed ~5 min
+  // after the last action), unioned with live pfctl when it IS readable so a
+  // block made outside the app still shows. We deliberately do NOT switch
+  // sources between polls — that flickered IPs in and out as sudo readability
+  // toggled, and made the panel disagree with the history modal.
+  // Known limitation: an IP unblocked out-of-band (reboot / external `pfctl -F`)
+  // keeps showing until it's unblocked in-app — reconciling that safely needs a
+  // feature (re-apply rules on launch), not a guess against an empty snapshot.
+  blockedIPs = new Set(livePfctl ?? []);
+  for (const ip of blockedMeta.keys()) blockedIPs.add(ip);
   renderBlockedPanel();
   if (blockedCountEl) blockedCountEl.textContent = blockedIPs.size;
   blockedCntBig.textContent = blockedIPs.size;
@@ -812,17 +820,21 @@ function askSudoPassword(action, ip, onSubmit) {
   const cleanup = (submitted) => {
     let pwd = submitted ? input.value : '';
     input.value = '';
+    document.removeEventListener('keydown', onEsc);
     release();
     overlay.remove();
     return pwd;
   };
   const cancel = () => { cleanup(false); };
   const submit = () => onSubmit(cleanup(true));
+  // Escape closes from anywhere in the dialog (not only while the input is
+  // focused), matching the confirm/VT/blocked-list modals.
+  function onEsc(e) { if (e.key === 'Escape') { e.preventDefault(); cancel(); } }
+  document.addEventListener('keydown', onEsc);
   overlay.querySelector('.confirm-cancel').addEventListener('click', cancel);
   overlay.querySelector('.sudo-submit').addEventListener('click', submit);
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { e.preventDefault(); submit(); }
-    else if (e.key === 'Escape') { e.preventDefault(); cancel(); }
   });
   overlay.addEventListener('click', (e) => { if (e.target === overlay) cancel(); });
 }
@@ -1082,7 +1094,10 @@ function blockIPManualAction(overlay, selectMode) {
   const release = trapFocus(dialog);
   const input = dialog.querySelector('.manual-ip-input');
   input.focus();
-  const close = () => { release(); dialog.remove(); };
+  const close = () => { document.removeEventListener('keydown', onEsc); release(); dialog.remove(); };
+  // Escape closes from anywhere in the dialog, not only while the input is focused.
+  function onEsc(e) { if (e.key === 'Escape') { e.preventDefault(); close(); } }
+  document.addEventListener('keydown', onEsc);
   const submit = () => {
     const ip = input.value.trim();
     if (!looksLikeIP(ip)) { showToast('Invalid IP format', 'error'); input.focus(); return; }
@@ -1105,7 +1120,6 @@ function blockIPManualAction(overlay, selectMode) {
   dialog.querySelector('.manual-submit').addEventListener('click', submit);
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { e.preventDefault(); submit(); }
-    else if (e.key === 'Escape') { e.preventDefault(); close(); }
   });
   dialog.addEventListener('click', (e) => { if (e.target === dialog) close(); });
 }
