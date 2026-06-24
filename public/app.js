@@ -67,6 +67,8 @@ let blockedMeta = new Map(); // ip -> { country, countryCode, isp, blockedAt }
 let refreshTimer = null;
 let refreshIntervalMs = 300000;
 const liveTraffic = new Map();        // trafficKey -> { bytesIn, bytesOut }
+let streamHealthy = false;   // true once the SSE stream is delivering deltas
+let lastDeltaAt = 0;         // ms timestamp of the last delta (for idle decay)
 const prevConnBytes = new Map();      // connId -> bytes
 // Filter toggles — mirror the chip states on load.
 const filter = { sys: true, v6: true, priv: true, q: '' };
@@ -508,8 +510,9 @@ async function fetchConnections() {
     const liveKeys = new Set();
     for (const p of data) for (const c of p.connections) liveKeys.add(c.trafficKey);
     for (const k of liveTraffic.keys()) if (!liveKeys.has(k)) liveTraffic.delete(k);
-    statusText.textContent = 'streaming · live';
-    statusText.classList.remove('err', 'wait');
+    statusText.textContent = streamHealthy ? 'streaming · live' : 'poll · stream offline';
+    statusText.classList.toggle('err', !streamHealthy);
+    statusText.classList.remove('wait');
     renderQueue();
   } catch (err) {
     statusText.textContent = 'error';
@@ -1114,6 +1117,9 @@ function connectTrafficStream() {
     try { arr = JSON.parse(ev.data); } catch { return; }
     if (!Array.isArray(arr)) return;
 
+    streamHealthy = true;
+    lastDeltaAt = Date.now();
+
     let rxBytesPerSec = 0, txBytesPerSec = 0;
     for (const e of arr) {
       if (!e || typeof e.key !== 'string') continue;
@@ -1143,8 +1149,20 @@ function connectTrafficStream() {
   });
 
   es.addEventListener('error', () => {
-    // EventSource reconnects on its own.
+    // EventSource auto-reconnects, but surface the degraded state meanwhile.
+    streamHealthy = false;
   });
+  es.addEventListener('open', () => { streamHealthy = true; });
+
+  // Decay the throughput readout to 0 when no deltas arrive (the server only
+  // emits a delta when traffic > 0). Paused while the tab is hidden.
+  setInterval(() => {
+    if (document.visibilityState !== 'visible') return;
+    if (lastDeltaAt && Date.now() - lastDeltaAt >= 1500) {
+      pushThroughput(0, 0);
+      lastDeltaAt = Date.now(); // keep ticking 0s while idle, but only once/window
+    }
+  }, 1000);
 }
 
 // ---------- Throughput history / graph ----------
