@@ -12,6 +12,7 @@ import { vtLookup } from './virustotal.js';
 import { blockIP, unblockIP, getBlockedIPs, getBlockedIPsOrNull } from './firewall.js';
 import { getBlockHistory, deleteBlockHistoryRow, reconcileActive } from './block-store.js';
 import { getSystemHealth } from './system-health.js';
+import { pickPrimaryIPv4 } from './net-iface.js';
 import type { ProcessInfo, EnrichedConnection, HostInfo } from './types.js';
 
 export const router: ReturnType<typeof Router> = Router();
@@ -244,17 +245,8 @@ router.get('/api/host-info', async (req, res) => {
     return;
   }
 
-  // Get local IP
-  const nets = networkInterfaces();
-  let localIP = '127.0.0.1';
-  for (const name of Object.keys(nets)) {
-    for (const net of nets[name] ?? []) {
-      if (net.family === 'IPv4' && !net.internal) {
-        localIP = net.address;
-        break;
-      }
-    }
-  }
+  // Get local IP (prefers en*, skips VPN/Docker/virtual interfaces)
+  const localIP = pickPrimaryIPv4(networkInterfaces());
 
   // Get public IP
   let publicIP = 'Unknown';
