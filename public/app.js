@@ -60,6 +60,11 @@ const queueGeo = document.getElementById('queueGeo');
 
 // ---------- State ----------
 const expandedPids = new Set();
+// PIDs present in the previous renderQueue() pass — diffed each render so a
+// newly-appearing process can be flashed (a new connection is the most
+// important event in a security tool). null until the first render so the
+// initial load doesn't flash every row.
+let prevPids = null;
 let lastData = null;
 let hostInfo = null;
 let blockedIPs = new Set();
@@ -246,10 +251,13 @@ function renderQueue(force = false) {
   updateExpandToggle(sorted);
 
   if (sorted.length === 0) {
-    queueEl.innerHTML = '<div class="queue-empty">No connections match current filters</div>';
+    queueEl.innerHTML = renderQueueEmpty();
   } else {
     queueEl.innerHTML = sorted.map((p, i) => renderProcRow(p, i)).join('');
+    flashNewRows(sorted);
   }
+  // Remember which PIDs we just drew so the next render can flash arrivals.
+  prevPids = new Set(sorted.map((p) => p.pid));
 
   // update stats strip
   const totalConns = sorted.reduce((s, p) => s + p.connections.length, 0);
@@ -275,12 +283,75 @@ function renderQueue(force = false) {
   dCtry.textContent = countries.size;
   dCtrySub.textContent = `across ${asns.size} ASN range${asns.size === 1 ? '' : 's'}`;
 
+  updateChipCounts();
   renderTopTalkers(sorted);
   radarUpdateTargets(sorted);
   // Draw one fresh frame for the new targets. No-op while the sweep loop is
   // already running; under reduced-motion (loop stopped) this redraws once so
   // new/closed connection pins still update instead of freezing on stale data.
   scheduleRadarFrame();
+}
+
+// Add the existing `.flash` class (flashFx keyframe) to rows whose PID wasn't
+// in the previous render. Skipped under prefers-reduced-motion and on the very
+// first render (prevPids === null) so we don't flash the whole list on load.
+function flashNewRows(sorted) {
+  if (prevPids === null || motionQuery?.matches) return;
+  for (const p of sorted) {
+    if (prevPids.has(p.pid)) continue;
+    const row = queueEl.querySelector(`.row[data-pid="${CSS.escape(String(p.pid))}"] .pname`);
+    if (row) row.classList.add('flash');
+  }
+}
+
+// How many rows each filter is *currently* hiding, so the chips can show a
+// "(N)" badge. Each count re-runs applyFilters with that one toggle forced off,
+// holding the other toggles + search as-is; the delta in visible processes is
+// what that filter alone is removing. Cheap (lastData is small) and only on render.
+function hiddenCounts() {
+  if (!lastData) return { sys: 0, v6: 0, priv: 0 };
+  const base = applyFilters(lastData).length;
+  const without = (key) => {
+    const saved = filter[key];
+    filter[key] = false;
+    const n = applyFilters(lastData).length;
+    filter[key] = saved;
+    return Math.max(0, n - base);
+  };
+  return {
+    sys: filter.sys ? without('sys') : 0,
+    v6: filter.v6 ? without('v6') : 0,
+    priv: filter.priv ? without('priv') : 0,
+  };
+}
+
+function updateChipCounts() {
+  const counts = hiddenCounts();
+  for (const key of ['sys', 'v6', 'priv']) {
+    const chip = chipsEl.querySelector(`.chip[data-f="${key}"]`);
+    if (!chip) continue;
+    let badge = chip.querySelector('.count');
+    const n = filter[key] ? counts[key] : 0;
+    if (n > 0) {
+      if (!badge) { badge = document.createElement('span'); badge.className = 'count'; chip.appendChild(badge); }
+      badge.textContent = n;
+    } else if (badge) {
+      badge.remove();
+    }
+  }
+}
+
+// Empty-state markup. The three default-on filters can hide every row, which
+// reads as "nothing is connecting" — offer a one-click reset so the user can
+// tell the difference. The Clear button only appears when a filter is actually
+// active (otherwise the list is genuinely empty).
+function renderQueueEmpty() {
+  const anyFilterOn = filter.sys || filter.v6 || filter.priv || filter.q;
+  const clearBtn = anyFilterOn
+    ? '<div><button class="queue-clear-filters" data-action="clear-filters">Clear filters</button></div>'
+    : '';
+  const msg = anyFilterOn ? 'No connections match current filters' : 'No connections';
+  return `<div class="queue-empty">${msg}${clearBtn}</div>`;
 }
 
 function renderProcRow(proc, i) {
@@ -402,15 +473,23 @@ queueEl.addEventListener('click', (e) => {
     renderQueue();
     return;
   }
+  if (action === 'clear-filters') {
+    clearFilters();
+    return;
+  }
+  if (action === 'retry-connections') {
+    fetchConnections();
+    return;
+  }
   e.stopPropagation();
   if (action === 'kill') {
-    killProcessAction(Number(el.dataset.pid), el.dataset.name, el.dataset.system === '1');
+    killProcessAction(Number(el.dataset.pid), el.dataset.name, el.dataset.system === '1', el);
   } else if (action === 'vt') {
-    vtCheckAction(el.dataset.ip);
+    vtCheckAction(el.dataset.ip, el);
   } else if (action === 'block') {
-    blockIPAction(el.dataset.ip);
+    blockIPAction(el.dataset.ip, el);
   } else if (action === 'unblock') {
-    unblockIPAction(el.dataset.ip);
+    unblockIPAction(el.dataset.ip, el);
   }
 });
 
@@ -463,6 +542,21 @@ chipsEl.addEventListener('click', (e) => {
   if (f in filter) filter[f] = b.classList.contains('on');
   renderQueue();
 });
+
+// Reset the three filter toggles + search to "show everything". Used by the
+// Clear-filters button in the empty state. Syncs the chip `.on` classes and the
+// search box so the UI stays consistent with the filter object.
+function clearFilters() {
+  filter.sys = false;
+  filter.v6 = false;
+  filter.priv = false;
+  filter.q = '';
+  for (const key of ['sys', 'v6', 'priv']) {
+    chipsEl.querySelector(`.chip[data-f="${key}"]`)?.classList.remove('on');
+  }
+  qEl.value = '';
+  renderQueue();
+}
 
 // Queue collapse
 qToggleBtn.addEventListener('click', () => {
@@ -534,6 +628,16 @@ async function fetchConnections() {
   } catch (err) {
     statusText.textContent = 'error';
     statusText.classList.add('err');
+    // The masthead status is far from the queue; surface the failure inline
+    // (with a Retry) so it isn't invisible. Only when we have nothing to show —
+    // a transient poll failure shouldn't blow away an already-rendered list.
+    if (!lastData) {
+      queueEl.innerHTML = `
+        <div class="queue-empty queue-error">
+          <div>Couldn't load connections — ${escapeHtml(err.message)}</div>
+          <div><button class="queue-clear-filters" data-action="retry-connections">Retry</button></div>
+        </div>`;
+    }
   }
 }
 
@@ -646,6 +750,18 @@ blockedAdd.addEventListener('click', () => blockIPManualAction());
 blockedHistoryBtn.addEventListener('click', () => showBlockedListModal());
 
 // ---------- Firewall / VT / Kill ----------
+// Disable a triggering button while its action is in flight so a double-click
+// can't fire two requests / open two sudo modals — same disable-then-restore
+// pattern as `.blocked-row-remove`. The `:disabled` rule in CSS supplies the
+// busy hint. Returns an unlock() that re-enables the button only if it's still
+// in the DOM (a renderQueue() rebuild may have replaced it — the isConnected
+// guard mirrors `.blocked-row-remove`).
+function lockBtn(btn) {
+  if (!btn) return () => {};
+  btn.disabled = true;
+  return () => { if (btn.isConnected) btn.disabled = false; };
+}
+
 async function sendFirewallRequest(path, ip, password) {
   let body = JSON.stringify({ password });
   password = '';
@@ -662,9 +778,10 @@ async function sendFirewallRequest(path, ip, password) {
   }
 }
 
-function blockIPAction(ip) {
+function blockIPAction(ip, btn) {
+  const unlock = lockBtn(btn);
   askSudoPassword('Block', ip, async (password) => {
-    if (!password) return;
+    if (!password) { unlock(); return; }
     try {
       const result = await sendFirewallRequest(`/api/block/${encodeURIComponent(ip)}`, ip, password);
       password = '';
@@ -675,12 +792,15 @@ function blockIPAction(ip) {
       }
     } catch (err) {
       showToast('Failed to block IP: ' + err.message, 'error');
+    } finally {
+      unlock();
     }
   });
 }
-function unblockIPAction(ip) {
+function unblockIPAction(ip, btn) {
+  const unlock = lockBtn(btn);
   askSudoPassword('Unblock', ip, async (password) => {
-    if (!password) return;
+    if (!password) { unlock(); return; }
     try {
       const result = await sendFirewallRequest(`/api/unblock/${encodeURIComponent(ip)}`, ip, password);
       password = '';
@@ -691,21 +811,24 @@ function unblockIPAction(ip) {
       }
     } catch (err) {
       showToast('Failed to unblock IP: ' + err.message, 'error');
+    } finally {
+      unlock();
     }
   });
 }
 
-function killProcessAction(pid, name, isSystem) {
-  if (isSystem) {
-    showConfirmDialog(
-      `"${name}" is a system process required for system stability. Are you sure you want to kill it?`,
-      () => doKill(pid),
-    );
-    return;
-  }
-  doKill(pid);
+function killProcessAction(pid, name, isSystem, btn) {
+  const unlock = lockBtn(btn);
+  // System processes get the strong "required for stability" warning; user
+  // processes still get a lightweight confirm — killing is irreversible, so it
+  // shouldn't be the one action that fires with no confirmation while every
+  // (reversible) block pops a sudo modal.
+  const message = isSystem
+    ? `"${name}" is a system process required for system stability. Are you sure you want to kill it?`
+    : `Kill "${name}" (PID ${pid})? This sends SIGTERM and can't be undone.`;
+  showConfirmDialog(message, () => doKill(pid, unlock), unlock);
 }
-async function doKill(pid) {
+async function doKill(pid, unlock) {
   try {
     const res = await apiFetch(`/api/kill/${pid}`, { method: 'POST' });
     const result = await res.json();
@@ -713,10 +836,13 @@ async function doKill(pid) {
     setTimeout(fetchConnections, 500);
   } catch (err) {
     showToast('Failed to kill process: ' + err.message, 'error');
+  } finally {
+    if (unlock) unlock();
   }
 }
 
-async function vtCheckAction(ip) {
+async function vtCheckAction(ip, btn) {
+  const unlock = lockBtn(btn);
   showVtModal(ip, 'Loading VirusTotal data…');
   try {
     const res = await apiFetch(`/api/vt/${encodeURIComponent(ip)}`);
@@ -724,6 +850,8 @@ async function vtCheckAction(ip) {
     showVtModal(ip, data.output, data.success);
   } catch (err) {
     showVtModal(ip, 'Failed to reach VT endpoint: ' + err.message, false);
+  } finally {
+    unlock();
   }
 }
 
@@ -758,7 +886,7 @@ function trapFocus(overlay) {
   };
 }
 
-function showConfirmDialog(message, onConfirm) {
+function showConfirmDialog(message, onConfirm, onCancel) {
   const existing = document.getElementById('confirmOverlay');
   if (existing) existing.remove();
   const overlay = document.createElement('div');
@@ -778,13 +906,17 @@ function showConfirmDialog(message, onConfirm) {
   `;
   document.body.appendChild(overlay);
   const release = trapFocus(overlay);
-  const close = () => { document.removeEventListener('keydown', onEsc); release(); overlay.remove(); };
-  function onEsc(e) { if (e.key === 'Escape') { e.preventDefault(); close(); } }
+  // `dismiss()` is the cancel path (Cancel button, Escape, backdrop) and runs
+  // onCancel so a caller can undo any pre-confirm side effect (e.g. an in-flight
+  // button lock). The confirm path closes without onCancel — onConfirm owns it.
+  const teardown = () => { document.removeEventListener('keydown', onEsc); release(); overlay.remove(); };
+  const dismiss = () => { teardown(); if (onCancel) onCancel(); };
+  function onEsc(e) { if (e.key === 'Escape') { e.preventDefault(); dismiss(); } }
   document.addEventListener('keydown', onEsc);
   overlay.querySelector('.confirm-cancel').focus(); // safe default focus (avoid the destructive action)
-  overlay.querySelector('.confirm-cancel').addEventListener('click', close);
-  overlay.querySelector('.confirm-kill').addEventListener('click', () => { close(); onConfirm(); });
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  overlay.querySelector('.confirm-cancel').addEventListener('click', dismiss);
+  overlay.querySelector('.confirm-kill').addEventListener('click', () => { teardown(); onConfirm(); });
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) dismiss(); });
 }
 
 function askSudoPassword(action, ip, onSubmit) {
@@ -809,7 +941,7 @@ function askSudoPassword(action, ip, onSubmit) {
       <input type="password" class="sudo-input" placeholder="System password" autocomplete="off" autocapitalize="off" spellcheck="false" />
       <div class="confirm-actions">
         <button class="confirm-btn confirm-cancel">Cancel</button>
-        <button class="confirm-btn confirm-kill sudo-submit">Proceed</button>
+        <button class="confirm-btn confirm-proceed sudo-submit">Proceed</button>
       </div>
     </div>
   `;
@@ -825,7 +957,10 @@ function askSudoPassword(action, ip, onSubmit) {
     overlay.remove();
     return pwd;
   };
-  const cancel = () => { cleanup(false); };
+  // Notify the caller on cancel too (with an empty password) so any pre-modal
+  // side effect can be undone — e.g. the in-flight button lock. Every onSubmit
+  // already early-returns on a falsy password, so this is a no-op for them.
+  const cancel = () => { cleanup(false); onSubmit(''); };
   const submit = () => onSubmit(cleanup(true));
   // Escape closes from anywhere in the dialog (not only while the input is
   // focused), matching the confirm/VT/blocked-list modals.

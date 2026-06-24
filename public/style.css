@@ -280,7 +280,14 @@ body.queue-collapsed .q-collapsed-rail { display: flex; }
 }
 .queue-body::-webkit-scrollbar { width: 8px; }
 .queue-body::-webkit-scrollbar-thumb { background: var(--line); }
-.queue-empty { padding: 20px; color: var(--ink-mute); font-family: var(--mono); font-size: 11px; text-align: center; }
+.queue-empty { padding: 20px; color: var(--ink-mute); font-family: var(--mono); font-size: 11px; text-align: center; display: flex; flex-direction: column; gap: 10px; align-items: center; }
+.queue-empty.queue-error { color: var(--red); }
+.queue-clear-filters {
+  font-family: var(--mono); font-size: 10px; letter-spacing: .1em; text-transform: uppercase;
+  padding: 5px 12px; border-radius: 2px; border: 1px solid var(--line);
+  color: var(--ink-mid); background: var(--bg-lift);
+}
+.queue-clear-filters:hover { color: var(--ink); border-color: var(--ink-mid); }
 
 .row {
   display: grid;
@@ -406,6 +413,10 @@ body.queue-collapsed .q-collapsed-rail { display: flex; }
 .conn .c .acts .block:hover { border-color: var(--red); background: var(--red-d); }
 .conn .c .acts .unblock { color: var(--green); border-color: oklch(0.80 0.14 145 / 0.3); }
 .conn .c .acts .unblock:hover { border-color: var(--green); }
+/* In-flight lock: dim + no-interaction while a kill/VT/block/unblock request
+   is pending (matches the disabled-button pattern used elsewhere). */
+.conn .c .acts button:disabled,
+.row .name .kill:disabled { opacity: 0.4; cursor: not-allowed; pointer-events: none; }
 
 /* ---------- Stage ---------- */
 .stage {
@@ -684,6 +695,10 @@ body.tweaks-on .tweaks { display: block; }
 .confirm-btn:hover { color: var(--ink); border-color: var(--ink-mid); }
 .confirm-btn.confirm-kill { color: var(--red); border-color: oklch(0.70 0.20 25 / 0.4); }
 .confirm-btn.confirm-kill:hover { background: var(--red-d); border-color: var(--red); }
+/* Neutral/primary affirmative — a password prompt isn't a destructive
+   confirmation, so the sudo "Proceed" button shouldn't read as red/danger. */
+.confirm-btn.confirm-proceed { color: var(--ice); border-color: oklch(0.84 0.11 230 / 0.4); }
+.confirm-btn.confirm-proceed:hover { background: var(--ice-d); border-color: var(--ice); }
 
 .sudo-dialog .sudo-title {
   font-family: var(--mono); font-size: 18px; font-weight: 500; margin-bottom: 8px;
