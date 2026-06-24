@@ -1,6 +1,7 @@
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { isIP } from 'node:net';
+import { safeEndStdin } from './proc-io.js';
 import { recordBlock, recordUnblock } from './block-store.js';
 import { lookupSingleIP } from './geolocation.js';
 
@@ -50,7 +51,7 @@ function validateSudo(password: string): Promise<void> {
       if (code === 0) resolve();
       else reject(new Error('sudo authentication failed (wrong password or sudo not permitted)'));
     });
-    child.stdin.end(password + '\n');
+    safeEndStdin(child, password + '\n');
   });
 }
 
@@ -70,7 +71,7 @@ function loadAnchorRules(rules: string): Promise<void> {
       if (code === 0) resolve();
       else reject(new Error(stderr.trim() || `pfctl exited ${code}`));
     });
-    child.stdin.end(rules);
+    safeEndStdin(child, rules);
   });
 }
 
