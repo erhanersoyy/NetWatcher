@@ -58,6 +58,9 @@ export interface BlockRecord {
   countryCode?: string | null;
   isp?: string | null;
   blockedAt: number;
+  /** Boot epoch-second in which this IP was last added to the pf table.
+   *  Stale (not enforced) when it differs from the current boot id. */
+  appliedBoot?: number | null;
 }
 
 export interface BlockEvent {
