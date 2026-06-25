@@ -51,10 +51,6 @@ State-changing calls require header `x-requested-by: netwatcher`. Block / unbloc
 
 ## Security
 
-- Bound to `127.0.0.1` only; aborts otherwise
-- `Host` / `Origin` allowlist + CSRF header on state changes
-- `execFile` / `spawn` in argv form only — no shell interpolation
-- PID ownership verified by numeric uid
 - Sudo password sent only to localhost, piped to `sudo -S` over stdin, never logged or stored
 
 ## pf anchor
