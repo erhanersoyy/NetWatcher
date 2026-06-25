@@ -12,7 +12,6 @@ const radarCtx = radarCanvas.getContext('2d');
 
 // ---------- Geometry state ----------
 let RW = 0, RH = 0, CX = 0, CY = 0, RR = 0;
-const DPR = Math.max(1, window.devicePixelRatio || 1);
 let homeLat = null, homeLon = null;
 let radarTargets = []; // { lat, lng, pt, hot, label, bytes, conns }
 let sweepAngle = -Math.PI / 2;
@@ -287,15 +286,18 @@ function radarFrame(ts) {
   }
 }
 
-// ---------- Public API for tweaks panel ----------
+// ---------- Public API ----------
 // Allows main.js to toggle radar on/off without importing internals.
 export function setRadarOn(enabled) {
   radarOn = enabled;
   if (radarOn) { lastT = 0; scheduleRadarFrame(); }
 }
 
-export function resetLastT() {
-  lastT = 0;
+// Called by connection-list.js with the filtered+sorted list — same as the
+// original app.js path. Keeps radar in sync with what's visible in the UI.
+export function updateRadar(procs) {
+  radarUpdateTargets(procs);
+  scheduleRadarFrame();
 }
 
 // ---------- initRadar: top-level setup called from main.js ----------
@@ -358,9 +360,4 @@ export function initRadar() {
 
   // Bus subscriptions — radar owns these
   on('host:changed', ({ lat, lon }) => radarSetHome(lat, lon));
-  on('data:changed', () => {
-    if (!S.lastData) return;
-    radarUpdateTargets(S.lastData);
-    scheduleRadarFrame();
-  });
 }
