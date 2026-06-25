@@ -816,3 +816,27 @@ body.tweaks-on .tweaks { display: block; }
     scroll-behavior: auto !important;
   }
 }
+
+/* Stale-blocks banner (re-apply after reboot) */
+.blocked-stale-banner {
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border: 1px solid rgba(240, 170, 70, 0.5);
+  border-radius: 6px;
+  background: rgba(240, 170, 70, 0.12);
+  color: #f0aa46;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.blocked-reapply-btn {
+  margin-left: 6px;
+  padding: 3px 8px;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 600;
+}
+.blocked-reapply-btn:hover { background: rgba(240, 170, 70, 0.2); }

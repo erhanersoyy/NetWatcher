@@ -5,7 +5,7 @@
 import { escapeHtml, looksLikeIP, formatTime } from './util.js';
 import { el } from './dom.js';
 import { S } from './state.js';
-import { apiFetch, sendFirewallRequest, fetchBlockedIPs, fetchConnections } from './api.js';
+import { apiFetch, sendFirewallRequest, fetchBlockedIPs, fetchConnections, reapplyBlocks } from './api.js';
 import { showToast, trapFocus, showConfirmDialog, askSudoPassword, showVtModal } from './modals.js';
 
 // ---------- In-flight button lock ----------
@@ -54,6 +54,31 @@ export function unblockIPAction(ip, btn) {
       }
     } catch (err) {
       showToast('Failed to unblock IP: ' + err.message, 'error');
+    } finally {
+      unlock();
+    }
+  });
+}
+
+// ---------- Re-apply all blocks (post-reboot) ----------
+export function reapplyBlocksAction(btn) {
+  const unlock = lockBtn(btn);
+  const ips = [...S.blockedMeta.keys()];
+  const target = ips.length === 1 ? ips[0] : `${ips.length} blocked IPs`;
+  askSudoPassword('Re-apply', target, async (password) => {
+    if (!password) { unlock(); return; }
+    try {
+      const result = await reapplyBlocks(password);
+      password = '';
+      const n = result.applied ? result.applied.length : 0;
+      const f = result.failed ? result.failed.length : 0;
+      const msg = result.success
+        ? `Re-applied ${n} IP${n === 1 ? '' : 's'}`
+        : (result.message || `Re-applied ${n}, ${f} failed`);
+      showToast(msg, result.success ? 'success' : 'error');
+      await fetchBlockedIPs();
+    } catch (err) {
+      showToast('Failed to re-apply: ' + err.message, 'error');
     } finally {
       unlock();
     }
@@ -392,6 +417,8 @@ export function initActions() {
   blockedAdd.addEventListener('click', () => blockIPManualAction());
   blockedHistoryBtn.addEventListener('click', () => showBlockedListModal());
   blockedListEl.addEventListener('click', (e) => {
+    const reapply = e.target.closest('[data-action="reapply-blocks"]');
+    if (reapply) { reapplyBlocksAction(reapply); return; }
     const b = e.target.closest('[data-action="unblock"]');
     if (!b) return;
     unblockIPAction(b.dataset.ip, b);

@@ -174,6 +174,9 @@ export function formatVtOutput(raw, success) {
 // ---------- Blocked sidebar ----------
 export function renderBlockedPanel() {
   const { blockedListEl } = el;
+  const banner = S.blocksStale
+    ? `<div class="blocked-stale-banner" role="alert">⚠️ ${S.staleCount} blocked IP${S.staleCount === 1 ? '' : 's'} ${S.staleCount === 1 ? 'is' : 'are'} not currently enforced (likely after a reboot). <button class="blocked-reapply-btn" data-action="reapply-blocks">Re-apply all</button></div>`
+    : '';
   const ips = [...S.blockedIPs];
   const q = S.blockedQ.toLowerCase();
   const filtered = ips.filter(ip => {
@@ -182,10 +185,10 @@ export function renderBlockedPanel() {
     return !q || hay.includes(q);
   });
   if (filtered.length === 0) {
-    blockedListEl.innerHTML = `<div class="blocked-empty">${q ? `No blocked addresses match "${escapeHtml(q)}"` : 'No IPs currently blocked'}</div>`;
+    blockedListEl.innerHTML = banner + `<div class="blocked-empty">${q ? `No blocked addresses match "${escapeHtml(q)}"` : 'No IPs currently blocked'}</div>`;
     return;
   }
-  blockedListEl.innerHTML = filtered.map(ip => {
+  blockedListEl.innerHTML = banner + filtered.map(ip => {
     const meta = S.blockedMeta.get(ip) || {};
     const country = meta.country || '';
     const cc = meta.countryCode || '';

@@ -7,6 +7,8 @@ export const S = {
   hostInfo:         null,
   blockedIPs:       new Set(),
   blockedMeta:      new Map(),   // ip -> { country, countryCode, isp, blockedAt }
+  blocksStale:      false,
+  staleCount:       0,
   liveTraffic:      new Map(),   // trafficKey -> { bytesIn, bytesOut }
   streamHealthy:    false,
   lastDeltaAt:      0,

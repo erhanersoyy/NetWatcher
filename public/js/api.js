@@ -119,6 +119,8 @@ export async function fetchBlockedIPs() {
         blockedAt: rec.blockedAt,
       });
     }
+    S.blocksStale = !!data.stale;
+    S.staleCount = data.staleCount || 0;
   } catch { /* silent */ }
   // Display source = the persisted active list (stable: it survives the common
   // case where pfctl is unreadable because the sudo timestamp lapsed ~5 min
@@ -131,6 +133,13 @@ export async function fetchBlockedIPs() {
   blockedCntBig.textContent = S.blockedIPs.size;
   footBlocked.textContent = S.blockedIPs.size;
   if (S.lastData) emit('data:changed');
+}
+
+// Re-apply all persisted blocks to pf in one request. `sendFirewallRequest`
+// already POSTs { password } and zeroes it after send; the ip arg is unused
+// by that helper (the path carries no ip here).
+export function reapplyBlocks(password) {
+  return sendFirewallRequest('/api/reapply', '', password);
 }
 
 // ---------- Firewall ----------
