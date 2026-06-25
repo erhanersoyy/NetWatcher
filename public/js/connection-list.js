@@ -6,7 +6,7 @@ import { escapeHtml, isIPv6, isPrivateIP, isLocalhost, flag, formatBytes } from 
 import { el } from './dom.js';
 import { S, on } from './state.js';
 import { fetchConnections } from './api.js';
-import { prefersReducedMotion } from './radar.js';
+import { prefersReducedMotion, updateRadar } from './radar.js';
 import { killProcessAction, vtCheckAction, blockIPAction, unblockIPAction } from './actions.js';
 
 // ---------- DOM aliases ----------
@@ -301,6 +301,7 @@ function renderQueue(force = false) {
 
   updateChipCounts(filtered.length);
   renderTopTalkers(sorted);
+  updateRadar(sorted);
 }
 
 function clearFilters() {
