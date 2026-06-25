@@ -4,9 +4,15 @@ import { fileURLToPath } from 'node:url';
 import type { BlockRecord, BlockEvent, BlockHistoryResponse } from './types.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-// src/ (dev via tsx) or dist/ (built) → ../data/blocks.json at project root.
-const DATA_DIR = join(__dirname, '..', 'data');
-const STORE_PATH = join(DATA_DIR, 'blocks.json');
+// src/ (dev via tsx) or dist/ (built) → ../data at project root. Overridable
+// via NETWATCHER_DATA_DIR so tests can isolate to a temp dir. Read lazily
+// (per call) so a test setting the env var after import still takes effect.
+function dataDir(): string {
+  return process.env.NETWATCHER_DATA_DIR || join(__dirname, '..', 'data');
+}
+function storePath(): string {
+  return join(dataDir(), 'blocks.json');
+}
 
 interface StoreShape {
   active: Record<string, BlockRecord>;
@@ -19,7 +25,7 @@ function emptyStore(): StoreShape {
 
 async function readStore(): Promise<StoreShape> {
   try {
-    const raw = await readFile(STORE_PATH, 'utf8');
+    const raw = await readFile(storePath(), 'utf8');
     const data = JSON.parse(raw) as Partial<StoreShape>;
     return {
       active: data.active ?? {},
@@ -32,10 +38,11 @@ async function readStore(): Promise<StoreShape> {
 }
 
 async function writeStore(data: StoreShape): Promise<void> {
-  await mkdir(DATA_DIR, { recursive: true });
-  const tmp = STORE_PATH + '.tmp';
+  const path = storePath();
+  await mkdir(dirname(path), { recursive: true });
+  const tmp = path + '.tmp';
   await writeFile(tmp, JSON.stringify(data, null, 2) + '\n', 'utf8');
-  await rename(tmp, STORE_PATH);
+  await rename(tmp, path);
 }
 
 // Serialize writes so two concurrent block requests don't race on read/write.
@@ -49,6 +56,7 @@ function serialize<T>(op: () => Promise<T>): Promise<T> {
 export function recordBlock(
   ip: string,
   meta: { country: string | null; countryCode?: string | null; isp?: string | null },
+  appliedBoot: number | null = null,
 ): Promise<void> {
   return serialize(async () => {
     const store = await readStore();
@@ -56,7 +64,7 @@ export function recordBlock(
     const country = meta.country ?? null;
     const countryCode = meta.countryCode ?? null;
     const isp = meta.isp ?? null;
-    store.active[ip] = { ip, country, countryCode, isp, blockedAt: at };
+    store.active[ip] = { ip, country, countryCode, isp, blockedAt: at, appliedBoot };
     store.history.push({ ip, action: 'block', at, country, countryCode, isp });
     await writeStore(store);
   });
@@ -77,6 +85,27 @@ export function recordUnblock(ip: string): Promise<void> {
     });
     await writeStore(store);
   });
+}
+
+// Re-stamp the boot id on the currently-active records for the given IPs —
+// called after a successful re-apply so they no longer count as stale.
+// Leaves records not in `ips` (and any IP no longer active) untouched.
+export function markReapplied(ips: string[], bootId: number): Promise<void> {
+  return serialize(async () => {
+    const store = await readStore();
+    let changed = false;
+    for (const ip of ips) {
+      const rec = store.active[ip];
+      if (rec) { rec.appliedBoot = bootId; changed = true; }
+    }
+    if (changed) await writeStore(store);
+  });
+}
+
+// Pure: how many active blocks were last applied in a different boot than the
+// current one (or never marked) — i.e. almost certainly not enforced anymore.
+export function countStaleBlocks(active: BlockRecord[], currentBoot: number): number {
+  return active.filter((r) => r.appliedBoot !== currentBoot).length;
 }
 
 // Drop one session's worth of events for an IP — the `block` event at
