@@ -2,8 +2,9 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { isIP } from 'node:net';
 import { safeEndStdin } from './proc-io.js';
-import { recordBlock, recordUnblock } from './block-store.js';
+import { recordBlock, recordUnblock, markReapplied } from './block-store.js';
 import { lookupSingleIP } from './geolocation.js';
+import { getBootId } from './boot-info.js';
 import type { ActionResult } from './types.js';
 
 const execFileAsync = promisify(execFile);
@@ -150,20 +151,18 @@ export async function blockIP(ip: string, password: string): Promise<ActionResul
     }
 
     // Record metadata out-of-band — pfctl's table has no notion of timestamps/country.
-    // The pf rule is already in place; don't block the response on geo lookup
-    // (ip-api.com can take >1s) or on the SQLite write. Fire-and-forget, update
-    // the country field later if geo resolves. If nothing resolves, we still
-    // have a timestamped `recordBlock(ip, null)` attempt.
+    // Stamp appliedBoot = current boot so this just-added IP is not flagged stale.
     void (async () => {
+      const bootId = await getBootId();
       try {
         const geo = await lookupSingleIP(ip);
         await recordBlock(ip, {
           country: geo?.country ?? null,
           countryCode: geo?.countryCode ?? null,
           isp: geo?.isp ?? null,
-        });
+        }, bootId);
       } catch {
-        await recordBlock(ip, { country: null }).catch(() => {});
+        await recordBlock(ip, { country: null }, bootId).catch(() => {});
       }
     })();
     return { success: true, message: `Blocked ${ip}` };
@@ -197,6 +196,56 @@ export async function unblockIP(ip: string, password: string): Promise<ActionRes
     const msg = err instanceof Error ? err.message : String(err);
     return { success: false, message: `Failed to unblock ${ip}: ${msg}` };
   }
+}
+
+// Re-add every given IP to the pf table under a single sudo prompt — used
+// after a reboot wiped the kernel ruleset. Best-effort per IP; collects
+// failures. Marks successfully-applied IPs with the current boot id so the
+// stale banner clears. Does NOT record new history events (these are not new
+// blocks, just re-enforcement of existing ones).
+export async function reapplyBlocks(
+  ips: string[],
+  password: string,
+): Promise<{ success: boolean; applied: string[]; failed: { ip: string; message: string }[]; message?: string }> {
+  if (typeof password !== 'string' || password.length === 0) {
+    return { success: false, applied: [], failed: [], message: 'sudo password required' };
+  }
+
+  try {
+    await validateSudo(password);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { success: false, applied: [], failed: [], message: msg };
+  }
+
+  try {
+    await ensureAnchor();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { success: false, applied: [], failed: ips.map((ip) => ({ ip, message: msg })), message: msg };
+  }
+
+  const currentBoot = await getBootId();
+  const applied: string[] = [];
+  const failed: { ip: string; message: string }[] = [];
+  for (const ip of ips) {
+    if (!isBlockableIP(ip)) {
+      failed.push({ ip, message: 'non-blockable IP' });
+      continue;
+    }
+    try {
+      await execFileAsync('sudo', ['-n', '/sbin/pfctl', '-a', ANCHOR, '-t', TABLE, '-T', 'add', ip], { timeout: 5000 });
+      applied.push(ip);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      failed.push({ ip, message: msg });
+    }
+  }
+
+  if (currentBoot != null && applied.length > 0) {
+    await markReapplied(applied, currentBoot);
+  }
+  return { success: failed.length === 0, applied, failed };
 }
 
 // Read-only view of live pfctl state. Distinguishes three outcomes:
