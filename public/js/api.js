@@ -120,7 +120,7 @@ export async function fetchBlockedIPs() {
       });
     }
     S.blocksStale = !!data.stale;
-    S.staleCount = data.staleCount || 0;
+    S.staleCount = Number(data.staleCount) || 0;
   } catch { /* silent */ }
   // Display source = the persisted active list (stable: it survives the common
   // case where pfctl is unreadable because the sudo timestamp lapsed ~5 min

@@ -175,7 +175,7 @@ export function formatVtOutput(raw, success) {
 export function renderBlockedPanel() {
   const { blockedListEl } = el;
   const banner = S.blocksStale
-    ? `<div class="blocked-stale-banner" role="alert">⚠️ ${S.staleCount} blocked IP${S.staleCount === 1 ? '' : 's'} ${S.staleCount === 1 ? 'is' : 'are'} not currently enforced (likely after a reboot). <button class="blocked-reapply-btn" data-action="reapply-blocks">Re-apply all</button></div>`
+    ? `<div class="blocked-stale-banner" role="alert">⚠️ ${S.staleCount} blocked IP${S.staleCount === 1 ? '' : 's'} ${S.staleCount === 1 ? 'is' : 'are'} not currently enforced (likely after a reboot). <button type="button" class="blocked-reapply-btn" data-action="reapply-blocks">Re-apply all</button></div>`
     : '';
   const ips = [...S.blockedIPs];
   const q = S.blockedQ.toLowerCase();
