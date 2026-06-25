@@ -9,8 +9,9 @@ import { subscribeTrafficStream, getLatestTrafficStats } from './traffic-stream.
 import { getProcessMeta } from './process-info.js';
 import { killProcess } from './process-kill.js';
 import { vtLookup } from './virustotal.js';
-import { blockIP, unblockIP, getBlockedIPsOrNull } from './firewall.js';
-import { getBlockHistory, deleteBlockHistoryRow } from './block-store.js';
+import { blockIP, unblockIP, getBlockedIPsOrNull, reapplyBlocks } from './firewall.js';
+import { getBlockHistory, deleteBlockHistoryRow, countStaleBlocks } from './block-store.js';
+import { getBootId } from './boot-info.js';
 import { getSystemHealth } from './system-health.js';
 import { pickPrimaryIPv4 } from './net-iface.js';
 import type { ProcessInfo, EnrichedConnection, HostInfo } from './types.js';
@@ -139,6 +140,13 @@ router.post('/api/unblock/:ip', async (req, res) => {
   res.status(result.success ? 200 : 400).json(result);
 });
 
+router.post('/api/reapply', async (req, res) => {
+  const password = typeof req.body?.password === 'string' ? req.body.password : '';
+  const ips = (await getBlockHistory()).active.map((r) => r.ip);
+  const result = await reapplyBlocks(ips, password);
+  res.status(result.success ? 200 : 400).json(result);
+});
+
 /**
  * Live per-connection RX/TX byte stream. Server-Sent Events — one long-
  * running HTTP response, `event: delta` messages each second carrying
@@ -203,8 +211,14 @@ router.get('/api/block-history', async (_req, res) => {
   // deleted still-wanted records; it also raced in-flight unblocks into
   // duplicate history rows and double-spawned pfctl per refresh. block/unblock
   // remain the authoritative mutators of the persisted store.
+  //
+  // `stale`/`staleCount` flag persisted-active blocks whose appliedBoot differs
+  // from the current boot (almost certainly wiped by a reboot). currentBoot is
+  // read without sudo; if it's unreadable we report 0 (no false-alarm banner).
   const data = await getBlockHistory();
-  res.json(data);
+  const currentBoot = await getBootId();
+  const staleCount = currentBoot == null ? 0 : countStaleBlocks(data.active, currentBoot);
+  res.json({ ...data, stale: staleCount > 0, staleCount });
 });
 
 // Delete a single session (one row) from the block history.
