@@ -14,7 +14,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `pnpm typecheck` — run after a series of edits
 - `pnpm build` — compile TS to `dist/`
 - `pnpm start` — run compiled build
-- `pnpm test` — run unit tests (Node's built-in runner over `src/**/*.test.ts`)
+- `pnpm test` — run unit tests (Node's built-in runner over `src/**/*.test.ts` and `public/**/*.test.js`)
 
 No linter is configured yet.
 
@@ -42,12 +42,22 @@ Single-process Node.js server: Express backend serves a static vanilla JS fronte
 
 ### Frontend (`public/`)
 
-- **No build step** — vanilla JS/CSS served as static files
-- `app.js` polls `/api/connections` every 2s, renders expandable process cards
+- **No build step** — native ES modules served as static files. Entry point: `js/main.js` loaded as `<script type="module">` in `index.html`
+- **Module layout:**
+  - `main.js` — thin bootstrap entry point
+  - `dom.js` — cached element handles + render helpers
+  - `state.js` — shared state object + tiny `EventTarget`-based bus (`emit`/`on`) for decoupled event flow
+  - `util.js` — pure helper functions (includes unit tests in `util.test.js`)
+  - `api.js` — HTTP fetchers for `/api/*` endpoints; emit bus events instead of calling render directly
+  - `connection-list.js` — render + filter + sort process cards
+  - `radar.js` — 2D canvas radar with rotating sweep, country pins (via `topojson-client`), gated by Resize/Intersection/visibility observers
+  - `panels.js` — sidebar panels: throughput, idle-decay, system-health
+  - `modals.js` — dialog primitives + blocked IP sidebar
+  - `actions.js` — privileged actions (kill, block, unblock, VirusTotal) + blocked-history modal
+  - `sse.js` — Server-Sent Events subscription for real-time connection updates
+- **Bus pattern:** producers emit state-change events (e.g., `emit('data:changed')`); consumers subscribe (e.g., `on('data:changed', render)`). This decouples fetch→render and avoids circular imports.
 - Filters (client-side): exclude IPv6, exclude private IPs, exclude localhost, hide system processes; text search across process/IP/domain/country/ISP
-- 2D canvas radar: rotating sweep + country pins (`topojson-client` for coastlines), gated by Resize/Intersection/visibility observers
 - System processes show caution badge; kill triggers a confirmation dialog
-- Per-row actions: VirusTotal lookup (`VT` button) and firewall block/unblock (opens/closes the pfctl entry)
 
 ## External Services
 
@@ -65,7 +75,7 @@ Single-process Node.js server: Express backend serves a static vanilla JS fronte
 
 - `lsof` without sudo only shows current user's processes — this is intentional
 - Geo/DNS lookup failures are silent — they return null/`'-'` and don't block rendering
-- The frontend has no build/bundle step; `public/app.js` is a single vanilla JS file
+- The frontend uses native ES modules with no build/bundle step; `public/js/main.js` is the entry point
 - `process-info.ts` is a static knowledge base — new processes need manual additions
 
 ## Workflow
