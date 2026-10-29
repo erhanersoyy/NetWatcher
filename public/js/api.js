@@ -1,3 +1,4 @@
+import { showSessionRequired } from './session.js';
 /* ============================================================
    NetWatcher — API fetch helpers
    All /api/* requests live here; render calls are replaced
@@ -6,10 +7,10 @@
 
 import { S, emit, CSRF_HEADER } from './state.js';
 import { el } from './dom.js';
-import { escapeHtml, flag } from './util.js';
+import { escapeHtml, flag, canonicalIP } from './util.js';
 
 const {
-  statusText, queueEl,
+  listStatus, hostStatus, blockedStatus, footAnchor,
   hostHostname, hostLocalIP, hostPublicIP, hostLocation, hostISP,
   queueISP, queueGeo,
   blockedCountEl, blockedCntBig, footBlocked,
@@ -18,20 +19,28 @@ const {
 // All /api/* requests must carry the CSRF header — the server enforces it
 // on GETs too (except SSE). Using a non-simple header forces a CORS
 // preflight on cross-origin attempts, which the Origin allowlist rejects.
-// EventSource (traffic-stream) cannot use this — it relies on Host/Origin
-// allowlist only.
-export function apiFetch(url, options = {}) {
-  return fetch(url, {
+// EventSource (traffic-stream) uses the session cookie plus Host/Origin checks.
+export async function apiFetch(url, options = {}) {
+  const response = await fetch(url, {
     ...options,
     headers: { ...CSRF_HEADER, ...(options.headers || {}) },
   });
+  if (response.status === 401) showSessionRequired();
+  return response;
 }
 
 // ---------- API: host info ----------
-export async function fetchHostInfo({ fresh } = { fresh: false }) {
+let hostRequest = null, hostRetryTimer = null;
+export function fetchHostInfo(options = { fresh: false }) {
+  if (hostRequest) return hostRequest;
+  clearTimeout(hostRetryTimer);
+  hostRequest = loadHostInfo(options).finally(() => { hostRequest = null; });
+  return hostRequest;
+}
+async function loadHostInfo({ fresh }) {
   try {
     const res = await apiFetch('/api/host-info' + (fresh ? '?fresh=1' : ''));
-    if (!res.ok) return;
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     S.hostInfo = await res.json();
     hostHostname.textContent = S.hostInfo.hostname || '—';
     hostLocalIP.textContent = S.hostInfo.localIP || '—';
@@ -44,94 +53,127 @@ export async function fetchHostInfo({ fresh } = { fresh: false }) {
       if (queueISP) queueISP.textContent = S.hostInfo.geo.isp || '—';
       if (queueGeo) queueGeo.innerHTML = `${f} ${escapeHtml(locText)}`;
       emit('host:changed', { lat: S.hostInfo.geo.lat, lon: S.hostInfo.geo.lon });
+    } else {
+      const label = S.hostInfo.geoStatus === 'pending' ? 'Looking up location…'
+        : S.hostInfo.geoStatus === 'rate-limited' ? 'Location service rate limited' : 'Location unavailable';
+      hostLocation.textContent = queueGeo.textContent = label;
+      hostISP.textContent = queueISP.textContent = '—';
+      emit('host:changed', { lat: null, lon: null });
     }
-  } catch { /* silent */ }
+    hostStatus.textContent = S.hostInfo.publicIPStatus === 'unavailable' ? 'Public-IP lookup unavailable · retrying automatically'
+      : S.hostInfo.geoStatus === 'pending' ? 'Public IP available · location lookup in progress'
+      : S.hostInfo.geoStatus === 'rate-limited' ? 'Location service rate limited' + (S.hostInfo.geoRetryAt ? ` · retry after ${new Date(S.hostInfo.geoRetryAt).toLocaleTimeString()}` : '')
+      : `Host information checked ${new Date().toLocaleTimeString()}`;
+    if (S.hostInfo.geoStatus === 'pending') hostRetryTimer = setTimeout(() => {
+      if (!document.hidden) fetchHostInfo();
+    }, 2000);
+  } catch {
+    hostStatus.textContent = S.hostInfo ? 'Host information unavailable · showing last known values' : 'Host information unavailable';
+  }
 }
 
 // ---------- API: connections ----------
-export async function fetchConnections() {
-  const liveTraffic = S.liveTraffic;
+let connectionsRequest = null;
+export function fetchConnections({ force = false } = {}) {
+  if (S.paused && !force) return Promise.resolve();
+  if (connectionsRequest) return connectionsRequest;
+  connectionsRequest = loadConnections(force).finally(() => { connectionsRequest = null; });
+  return connectionsRequest;
+}
+
+async function loadConnections(force) {
+  const version = S.monitorVersion;
   try {
     const res = await apiFetch('/api/connections');
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
+    if (!Array.isArray(data)) throw new Error('Invalid connection data');
+    if (version !== S.monitorVersion && !force) return;
     S.lastData = data;
-    // Prune liveTraffic to the currently-live connections so the Map can't grow
-    // unbounded as ephemeral sockets (TIME_WAIT, short UDP, browser conns) churn.
-    const liveKeys = new Set();
-    for (const p of data) for (const c of p.connections) liveKeys.add(c.trafficKey);
-    for (const k of liveTraffic.keys()) if (!liveKeys.has(k)) liveTraffic.delete(k);
-    statusText.textContent = S.streamHealthy ? 'streaming · live' : 'poll · stream offline';
-    statusText.classList.toggle('err', !S.streamHealthy);
-    statusText.classList.remove('wait');
-    queueEl.querySelector('.queue-error-banner')?.remove(); // recovered — drop any stale-refresh banner
+    const liveKeys = new Set(data.flatMap(p => p.connections.map(c => c.trafficKey)));
+    for (const key of S.liveTraffic.keys()) if (!liveKeys.has(key)) S.liveTraffic.delete(key);
+    S.connectionsUpdatedAt = Date.now();
+    S.connectionsError = '';
+    document.getElementById('queueError').hidden = true;
     emit('data:changed');
   } catch (err) {
-    statusText.textContent = 'error';
-    statusText.classList.add('err');
-    // Surface the failure near the queue (the masthead status is far away).
-    if (!S.lastData) {
-      // Nothing rendered yet — show the full inline error + Retry.
-      queueEl.innerHTML = `
-        <div class="queue-empty queue-error">
-          <div>Couldn't load connections — ${escapeHtml(err.message)}</div>
-          <div><button class="queue-clear-filters" data-action="retry-connections">Retry</button></div>
-        </div>`;
-    } else if (!queueEl.querySelector('.queue-error-banner')) {
-      // Keep the (stale) list but flag that it stopped refreshing, with a Retry,
-      // so a sustained outage after the first successful load isn't invisible.
-      // Built with DOM APIs + textContent (no innerHTML sink).
-      const banner = document.createElement('div');
-      banner.className = 'queue-error-banner';
-      banner.textContent = `⚠ Couldn't refresh — ${err.message} `;
-      const retry = document.createElement('button');
-      retry.className = 'queue-clear-filters';
-      retry.dataset.action = 'retry-connections';
-      retry.textContent = 'Retry';
-      banner.appendChild(retry);
-      queueEl.insertBefore(banner, queueEl.firstChild);
-    }
+    if (version !== S.monitorVersion && !force) return;
+    S.connectionsError = err.message;
+    const banner = document.getElementById('queueError');
+    banner.replaceChildren(document.createTextNode(`Couldn't refresh connections: ${err.message}. `));
+    const retry = document.createElement('button');
+    retry.className = 'queue-clear-filters';
+    retry.textContent = 'Retry';
+    retry.addEventListener('click', () => fetchConnections({ force: true }));
+    banner.appendChild(retry);
+    banner.hidden = false;
+    emit('data:changed');
+  } finally {
+    updateListStatus();
   }
 }
 
+export function updateListStatus() {
+  const checked = S.connectionsUpdatedAt
+    ? `Last list update ${new Date(S.connectionsUpdatedAt).toLocaleTimeString()}`
+    : 'No connection snapshot yet';
+  listStatus.textContent = `${S.paused ? 'Paused · ' : ''}${checked}${S.connectionsError ? ' · refresh failed' : ''}`;
+}
+
 // ---------- API: blocked ----------
-export async function fetchBlockedIPs() {
-  let livePfctl = null;  // null = pfctl unreadable (unknown); a Set = authoritative
+let blockedRequest = null;
+export function fetchBlockedIPs() {
+  if (blockedRequest) return blockedRequest;
+  blockedRequest = loadBlockedIPs().finally(() => { blockedRequest = null; });
+  return blockedRequest;
+}
+
+async function loadBlockedIPs() {
+  let livePfctl = null;
+  S.firewallStatus = null;
   try {
-    const res = await apiFetch('/api/blocked');
+    const res = await apiFetch('/api/firewall-status');
     if (res.ok) {
-      const ips = await res.json();
-      if (Array.isArray(ips)) livePfctl = new Set(ips);
+      const status = await res.json();
+      S.firewallStatus = status;
+      if (Array.isArray(status.tableIPs)) livePfctl = new Set(status.tableIPs.map(canonicalIP));
     }
-    // A null body (pfctl unavailable) leaves livePfctl null → unknown below.
-  } catch { /* silent → unknown */ }
-  // Pull richer metadata (country, blockedAt) from the history endpoint.
+  } catch { /* Unreadable is unknown, never an empty table. */ }
+  S.pfIPs = livePfctl;
+  S.blocksCheckedAt = Date.now();
+  S.historyFresh = false;
+  S.historyError = '';
   try {
     const res = await apiFetch('/api/block-history');
-    if (!res.ok) throw 0;
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
-    S.blockedMeta = new Map();
-    for (const rec of (data.active || [])) {
-      S.blockedMeta.set(rec.ip, {
-        country: rec.country,
-        countryCode: rec.countryCode || null,
-        isp: rec.isp || null,
-        blockedAt: rec.blockedAt,
-      });
-    }
+    if (!Array.isArray(data.active) || !Array.isArray(data.history)) throw new Error('Invalid history data');
+    S.historyData = data;
+    S.blockedMeta = new Map(data.active.map(rec => [canonicalIP(rec.ip), rec]));
     S.blocksStale = !!data.stale;
     S.staleCount = Number(data.staleCount) || 0;
-  } catch { /* silent */ }
-  // Display source = the persisted active list (stable: it survives the common
-  // case where pfctl is unreadable because the sudo timestamp lapsed ~5 min
-  // after the last action), unioned with live pfctl when it IS readable so a
-  // block made outside the app still shows.
+    S.historyFresh = true;
+  } catch (err) {
+    S.historyError = `Saved rules could not be refreshed: ${err.message}`;
+  }
   S.blockedIPs = new Set(livePfctl ?? []);
   for (const ip of S.blockedMeta.keys()) S.blockedIPs.add(ip);
+  const time = new Date(S.blocksCheckedAt).toLocaleTimeString();
+  const health = S.firewallStatus;
+  const configChecked = health?.pfEnabled === true && health?.anchorLinked === true && health?.rulesPresent === true;
+  const disabled = health?.pfEnabled === false;
+  const incomplete = health?.anchorLinked === false || health?.rulesPresent === false;
+  const summary = disabled ? 'PF is disabled' : incomplete ? 'Firewall rules missing or disconnected'
+    : configChecked ? 'PF configuration checked' : 'PF configuration unverified';
+  footAnchor.textContent = summary;
+  footAnchor.className = !configChecked ? 'unverified' : '';
+  blockedStatus.classList.toggle('unverified', !configChecked);
+  blockedStatus.textContent = S.historyError || `${summary} · ${livePfctl === null ? 'table unavailable' : `table checked ${time}`}. Traffic blocking has not been independently tested.`;
   emit('blocked:changed');
-  if (blockedCountEl) blockedCountEl.textContent = S.blockedIPs.size;
-  blockedCntBig.textContent = S.blockedIPs.size;
-  footBlocked.textContent = S.blockedIPs.size;
+  const count = livePfctl !== null || S.historyData !== null ? S.blockedIPs.size : '—';
+  if (blockedCountEl) blockedCountEl.textContent = count;
+  blockedCntBig.textContent = count;
+  footBlocked.textContent = count;
   if (S.lastData) emit('data:changed');
 }
 

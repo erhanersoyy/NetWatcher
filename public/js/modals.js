@@ -1,148 +1,153 @@
-/* ============================================================
-   NetWatcher — modal dialogs, focus-trap, toast, blocked sidebar
-   ============================================================ */
+import { escapeHtml, flag, relTime, describeBlock, blockRepairStatus, csvCell } from './util.js';
+import { el, preserveFocus } from './dom.js';
+import { S, on, emit } from './state.js';
+import { fetchBlockedIPs } from './api.js';
 
-import { escapeHtml, flag, relTime } from './util.js';
-import { el } from './dom.js';
-import { S, on } from './state.js';
-
-// ---------- Toast ----------
 export function showToast(message, type) {
-  const existing = document.querySelector('.toast');
-  if (existing) existing.remove();
+  document.querySelector('.toast')?.remove();
   const toast = document.createElement('div');
   toast.className = `toast ${type || ''}`;
-  toast.textContent = message;
+  toast.setAttribute('role', type === 'error' ? 'alert' : 'status');
+  const text = document.createElement('span');
+  text.textContent = message;
+  const dismiss = document.createElement('button');
+  dismiss.textContent = '×';
+  dismiss.setAttribute('aria-label', 'Dismiss notification');
+  dismiss.addEventListener('click', () => toast.remove());
+  toast.append(text, dismiss);
   document.body.appendChild(toast);
-  setTimeout(() => toast.remove(), 3000);
+  if (type !== 'error') setTimeout(() => toast.remove(), 5000);
 }
 
-// Minimal modal focus management: save the previously-focused element, trap
-// Tab within the overlay, and restore focus on close. Returns a cleanup fn.
-export function trapFocus(overlay) {
-  const prev = document.activeElement;
-  const sel = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
-  const onKey = (e) => {
-    if (e.key !== 'Tab') return;
-    const items = [...overlay.querySelectorAll(sel)].filter((el) => !el.disabled && el.offsetParent !== null);
-    if (!items.length) return;
-    const first = items[0], last = items[items.length - 1];
-    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
-    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
-  };
-  overlay.addEventListener('keydown', onKey);
-  return () => {
-    overlay.removeEventListener('keydown', onKey);
-    if (prev && typeof prev.focus === 'function') prev.focus();
-  };
-}
-
-export function showConfirmDialog(message, onConfirm, onCancel, confirmLabel = 'Kill Anyway') {
-  const existing = document.getElementById('confirmOverlay');
-  if (existing) existing.remove();
-  const overlay = document.createElement('div');
-  overlay.id = 'confirmOverlay';
+// Native modal dialogs isolate the background and handle nested Escape/Tab.
+export function openDialog(id, html, { onClose, returnFocus } = {}) {
+  const overlay = document.createElement('dialog');
+  overlay.id = id;
   overlay.className = 'confirm-overlay';
-  overlay.setAttribute('role', 'dialog');
-  overlay.setAttribute('aria-modal', 'true');
-  overlay.innerHTML = `
+  overlay.innerHTML = html;
+  const title = overlay.querySelector('[data-dialog-title]');
+  if (title) {
+    title.id = `${id}Title`;
+    overlay.setAttribute('aria-labelledby', title.id);
+  }
+  const previous = returnFocus || document.activeElement;
+  let closed = false;
+  const close = () => {
+    if (closed || overlay.dataset.busy === 'true') return;
+    closed = true;
+    onClose?.(); // Unlock the trigger before restoring focus.
+    overlay.close();
+    overlay.remove();
+    emit('dialog:closed');
+    let target = previous?.isConnected ? previous : null;
+    if (!target && previous?.dataset.focusKey) {
+      target = document.querySelector(`[data-focus-key="${CSS.escape(previous.dataset.focusKey)}"]`);
+    }
+    if (!target || target.disabled || target === document.body) {
+      target = [...document.querySelectorAll('dialog[open]')].at(-1)?.querySelector('button') || el.qEl;
+    }
+    target?.focus({ preventScroll: true });
+  };
+  overlay.addEventListener('cancel', (e) => { e.preventDefault(); close(); });
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay || e.target.closest('[data-close]')) close();
+  });
+  document.body.appendChild(overlay);
+  overlay.showModal();
+  return { overlay, close };
+}
+
+export function showConfirmDialog(message, onConfirm, onCancel, confirmLabel = 'Confirm', returnFocus) {
+  let confirmed = false;
+  const { overlay, close } = openDialog('confirmOverlay', `
     <div class="confirm-dialog">
-      <div class="confirm-icon">⚠</div>
-      <div class="confirm-message">${escapeHtml(message)}</div>
+      <h2 data-dialog-title class="sudo-title">Confirm action</h2>
+      <p class="confirm-message">${escapeHtml(message)}</p>
       <div class="confirm-actions">
-        <button class="confirm-btn confirm-cancel">Cancel</button>
+        <button class="confirm-btn confirm-cancel" data-close autofocus>Cancel</button>
         <button class="confirm-btn confirm-kill">${escapeHtml(confirmLabel)}</button>
       </div>
-    </div>
-  `;
-  document.body.appendChild(overlay);
-  const release = trapFocus(overlay);
-  const teardown = () => { document.removeEventListener('keydown', onEsc); release(); overlay.remove(); };
-  const dismiss = () => { teardown(); if (onCancel) onCancel(); };
-  function onEsc(e) { if (e.key === 'Escape') { e.preventDefault(); dismiss(); } }
-  document.addEventListener('keydown', onEsc);
-  overlay.querySelector('.confirm-cancel').focus();
-  overlay.querySelector('.confirm-cancel').addEventListener('click', dismiss);
-  overlay.querySelector('.confirm-kill').addEventListener('click', () => { teardown(); onConfirm(); });
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) dismiss(); });
-}
-
-export function askSudoPassword(action, ip, onSubmit) {
-  const existing = document.getElementById('sudoOverlay');
-  if (existing) existing.remove();
-  const overlay = document.createElement('div');
-  overlay.id = 'sudoOverlay';
-  overlay.className = 'confirm-overlay';
-  overlay.setAttribute('role', 'dialog');
-  overlay.setAttribute('aria-modal', 'true');
-  overlay.innerHTML = `
-    <div class="confirm-dialog sudo-dialog">
-      <div class="confirm-icon">⚠</div>
-      <div class="confirm-message">
-        <div class="sudo-title">sudo operation</div>
-        <div class="sudo-body">
-          <strong>${escapeHtml(action)}</strong> runs <code>pfctl</code> as root to modify the firewall.<br>
-          Target IP: <code>${escapeHtml(ip)}</code>
-        </div>
-        <div class="sudo-note">Your password is sent once to the local server and <strong>never stored</strong>.</div>
-      </div>
-      <input type="password" class="sudo-input" placeholder="System password" autocomplete="off" autocapitalize="off" spellcheck="false" />
-      <div class="confirm-actions">
-        <button class="confirm-btn confirm-cancel">Cancel</button>
-        <button class="confirm-btn confirm-proceed sudo-submit">Proceed</button>
-      </div>
-    </div>
-  `;
-  document.body.appendChild(overlay);
-  const release = trapFocus(overlay);
-  const input = overlay.querySelector('.sudo-input');
-  input.focus();
-  const cleanup = (submitted) => {
-    let pwd = submitted ? input.value : '';
-    input.value = '';
-    document.removeEventListener('keydown', onEsc);
-    release();
-    overlay.remove();
-    return pwd;
-  };
-  const cancel = () => { cleanup(false); onSubmit(''); };
-  const submit = () => onSubmit(cleanup(true));
-  function onEsc(e) { if (e.key === 'Escape') { e.preventDefault(); cancel(); } }
-  document.addEventListener('keydown', onEsc);
-  overlay.querySelector('.confirm-cancel').addEventListener('click', cancel);
-  overlay.querySelector('.sudo-submit').addEventListener('click', submit);
-  input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') { e.preventDefault(); submit(); }
+    </div>`, { returnFocus, onClose: () => { if (!confirmed) onCancel?.(); } });
+  overlay.querySelector('.confirm-kill').addEventListener('click', () => {
+    confirmed = true;
+    close();
+    onConfirm();
   });
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) cancel(); });
 }
 
-export function showVtModal(ip, content, success) {
-  const existing = document.getElementById('vtOverlay');
-  if (existing) existing.remove();
-  const overlay = document.createElement('div');
-  overlay.id = 'vtOverlay';
-  overlay.className = 'confirm-overlay';
-  overlay.setAttribute('role', 'dialog');
-  overlay.setAttribute('aria-modal', 'true');
-  overlay.innerHTML = `
+export function askSudoPassword(action, target, run, { onClose, returnFocus, context = '' } = {}) {
+  const label = action.startsWith('Unblock') ? 'Remove block' : action === 'Re-apply' ? 'Re-apply saved blocks' : 'Block IP';
+  const effect = action.startsWith('Unblock')
+    ? 'Remove this IP rule for all applications. Other firewall rules may still restrict traffic.'
+    : 'Block incoming and outgoing traffic for all applications using these IPs. Shared services may be affected.';
+  const { overlay, close } = openDialog('sudoOverlay', `
+    <form class="confirm-dialog sudo-dialog">
+      <h2 data-dialog-title class="sudo-title">${escapeHtml(label)}</h2>
+      <p class="sudo-body"><strong>Target: ${escapeHtml(target)}</strong></p>
+      <p class="sudo-body">${effect}</p>
+      ${context ? `<p class="sudo-body">${escapeHtml(context)}</p>` : ''}
+      <p class="sudo-note">macOS administrator permission is required. Your password is used only for this operation by the local server and never stored. Saved blocks may need reapplying after a restart. Use IP block rules to remove a block.</p>
+      <label for="sudoPassword">macOS password</label>
+      <input id="sudoPassword" type="password" class="sudo-input" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="sudoError" autofocus />
+      <p id="sudoError" class="form-error" role="alert"></p>
+      <div class="confirm-actions">
+        <button type="button" class="confirm-btn confirm-cancel" data-close>Cancel</button>
+        <button class="confirm-btn confirm-proceed sudo-submit" type="submit">${escapeHtml(label)}</button>
+      </div>
+    </form>`, { onClose, returnFocus });
+  const form = overlay.querySelector('form');
+  const input = overlay.querySelector('input');
+  const error = overlay.querySelector('.form-error');
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (overlay.dataset.busy === 'true') return;
+    if (!input.value) {
+      error.textContent = 'Enter your macOS password to continue.';
+      input.setAttribute('aria-invalid', 'true');
+      input.focus();
+      return;
+    }
+    let password = input.value;
+    input.value = '';
+    error.textContent = '';
+    input.removeAttribute('aria-invalid');
+    overlay.dataset.busy = 'true';
+    form.setAttribute('aria-busy', 'true');
+    form.querySelectorAll('button, input').forEach(el => { el.disabled = true; });
+    const submit = form.querySelector('[type="submit"]');
+    submit.textContent = 'Working…';
+    try {
+      const pending = run(password);
+      password = '';
+      const result = await pending;
+      if (!result?.success) throw new Error(result?.message || 'Operation failed. Try again.');
+      overlay.dataset.busy = 'false';
+      close();
+      showToast(result.message || 'Firewall rule updated', 'success');
+    } catch (err) {
+      error.textContent = err.message;
+      input.setAttribute('aria-invalid', 'true');
+    } finally {
+      password = '';
+      overlay.dataset.busy = 'false';
+      form.removeAttribute('aria-busy');
+      form.querySelectorAll('button, input').forEach(el => { el.disabled = false; });
+      submit.textContent = label;
+      if (overlay.isConnected) input.focus();
+    }
+  });
+}
+
+export function showVtModal(ip, content, success, options) {
+  return openDialog('vtOverlay', `
     <div class="vt-modal">
       <div class="vt-modal-header">
-        <span class="vt-modal-title">VirusTotal · ${escapeHtml(ip)}</span>
-        <button class="vt-modal-close">×</button>
+        <h2 data-dialog-title class="vt-modal-title">VirusTotal · ${escapeHtml(ip)}</h2>
+        <button class="vt-modal-close" data-close aria-label="Close VirusTotal" autofocus>×</button>
       </div>
-      <div class="vt-modal-body">${formatVtOutput(content, success)}</div>
-    </div>
-  `;
-  document.body.appendChild(overlay);
-  const release = trapFocus(overlay);
-  const close = () => { document.removeEventListener('keydown', onEsc); release(); overlay.remove(); };
-  function onEsc(e) { if (e.key === 'Escape') { e.preventDefault(); close(); } }
-  document.addEventListener('keydown', onEsc);
-  const closeBtn = overlay.querySelector('.vt-modal-close');
-  closeBtn.focus();
-  closeBtn.addEventListener('click', close);
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+      <p class="reputation-note panel-note">IP reputation from VirusTotal via your local CLI.</p>
+      <div class="vt-modal-body" aria-live="polite">${formatVtOutput(content, success)}</div>
+    </div>`, options);
 }
 
 export function formatVtOutput(raw, success) {
@@ -174,8 +179,10 @@ export function formatVtOutput(raw, success) {
 // ---------- Blocked sidebar ----------
 export function renderBlockedPanel() {
   const { blockedListEl } = el;
-  const banner = S.blocksStale
-    ? `<div class="blocked-stale-banner" role="alert">⚠️ ${S.staleCount} blocked IP${S.staleCount === 1 ? '' : 's'} ${S.staleCount === 1 ? 'is' : 'are'} not currently enforced (likely after a reboot). <button type="button" class="blocked-reapply-btn" data-action="reapply-blocks">Re-apply all</button></div>`
+  const restoreFocus = preserveFocus(blockedListEl);
+  const repair = S.historyFresh ? blockRepairStatus(S.pfIPs, S.blockedMeta, S.firewallStatus) : null;
+  const banner = repair
+    ? `<div class="blocked-stale-banner" ${repair.urgent ? 'role="alert"' : ''}>${escapeHtml(repair.message)} <button type="button" class="blocked-reapply-btn" data-action="reapply-blocks" data-focus-key="reapply">Re-apply all</button></div>`
     : '';
   const ips = [...S.blockedIPs];
   const q = S.blockedQ.toLowerCase();
@@ -185,11 +192,13 @@ export function renderBlockedPanel() {
     return !q || hay.includes(q);
   });
   if (filtered.length === 0) {
-    blockedListEl.innerHTML = banner + `<div class="blocked-empty">${q ? `No blocked addresses match "${escapeHtml(q)}"` : 'No IPs currently blocked'}</div>`;
+    blockedListEl.innerHTML = banner + `<div class="blocked-empty">${q ? `No blocked addresses match "${escapeHtml(q)}"` : S.historyError ? 'Saved rules unavailable. Retry the check.' : 'No saved IP block rules'}</div>`;
+    restoreFocus();
     return;
   }
   blockedListEl.innerHTML = banner + filtered.map(ip => {
     const meta = S.blockedMeta.get(ip) || {};
+    const status = describeBlock(ip, S.pfIPs, S.blockedMeta, S.staleCount, S.historyFresh, S.firewallStatus);
     const country = meta.country || '';
     const cc = meta.countryCode || '';
     const isp = meta.isp || '';
@@ -202,10 +211,12 @@ export function renderBlockedPanel() {
         <span class="cc">${ccLabel}</span>
         <span class="isp" title="${escapeHtml(isp)}">${escapeHtml(isp)}</span>
         <span class="when">${escapeHtml(when)}</span>
-        <button class="un" data-action="unblock" data-ip="${escapeHtml(ip)}">Unblock</button>
+        <span class="blocked-tag ${status.kind}">${status.label}</span>
+        <button class="un" data-focus-key="unblock-${escapeHtml(ip)}" data-action="unblock" data-ip="${escapeHtml(ip)}">Unblock</button>
       </div>
     `;
   }).join('');
+  restoreFocus();
 }
 
 // Wire up the blocked sidebar: search input, export button, and bus subscription.
@@ -221,15 +232,19 @@ export function initBlockedPanel() {
   blockedExport.addEventListener('click', () => {
     const rows = [...S.blockedIPs].map(ip => {
       const m = S.blockedMeta.get(ip) || {};
-      return `${ip},${m.country || ''},${m.blockedAt ? new Date(m.blockedAt).toISOString() : ''}`;
+      const status = describeBlock(ip, S.pfIPs, S.blockedMeta, S.staleCount, S.historyFresh, S.firewallStatus);
+      return [ip, m.country || '', m.blockedAt ? new Date(m.blockedAt).toISOString() : '', status.label].map(csvCell).join(',');
     });
-    const csv = 'ip,country,blockedAt\n' + rows.join('\n');
+    const csv = 'ip,country,blockedAt,status\n' + rows.join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = 'netwatcher-blocked.csv';
     a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   });
 
+  const retry = document.getElementById('blockedRetry');
+  retry.addEventListener('click', () => fetchBlockedIPs());
   on('blocked:changed', renderBlockedPanel);
 }

@@ -1,3 +1,6 @@
+import type { ProcessIdentity } from './process-identity.js';
+import type { ProcessVerification } from './process-verification.js';
+import type { LookupState } from './geolocation.js';
 export interface Connection {
   pid: number;
   processName: string;
@@ -23,9 +26,14 @@ export interface HostInfo {
   publicIP: string;
   hostname: string;
   geo: GeoInfo | null;
+  publicIPStatus?: 'ready' | 'unavailable';
+  geoStatus?: LookupState;
+  geoRetryAt?: number;
+  checkedAt?: number | null;
 }
 
 export interface EnrichedConnection {
+  enrichment?: { geo: LookupState; dns: LookupState };
   protocol: string;
   remoteAddress: string;
   remotePort: number;
@@ -45,6 +53,8 @@ export interface EnrichedConnection {
 }
 
 export interface ProcessInfo {
+  identity: ProcessIdentity | null;
+  verification?: ProcessVerification;
   pid: number;
   processName: string;
   description: string;
@@ -79,6 +89,9 @@ export interface BlockHistoryResponse {
 
 /** Standard result for state-changing actions (block/unblock/kill/etc.). */
 export interface ActionResult {
+  partial?: boolean;
+  stages?: { tableUpdated: boolean; stateCleanup: boolean | null; persisted: boolean };
+  trafficVerified?: false;
   success: boolean;
   message: string;
 }

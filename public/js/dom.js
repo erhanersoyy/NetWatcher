@@ -6,6 +6,18 @@
 
 const $ = (id) => document.getElementById(id);
 
+export function preserveFocus(container) {
+  const active = document.activeElement;
+  const key = container.contains(active) ? active.dataset.focusKey : null;
+  const scroll = container.scrollTop;
+  return () => {
+    container.scrollTop = scroll;
+    if (!key) return;
+    const next = container.querySelector(`[data-focus-key="${CSS.escape(key)}"]`);
+    (next || document.getElementById('searchInput')).focus({ preventScroll: true });
+  };
+}
+
 export const el = Object.freeze({
   // queue / search / controls
   queueEl:        $('queue'),
@@ -18,6 +30,14 @@ export const el = Object.freeze({
   qToggleIcon:    $('qToggleIcon'),
   refreshSelect:  $('refreshSelect'),
   refreshNowBtn:  $('refreshNowBtn'),
+  pauseBtn:      $('pauseBtn'),
+  listStatus:    $('listStatus'),
+  queueSummary:  $('queueSummary'),
+  trafficStatus: $('trafficStatus'),
+  hostStatus:    $('hostStatus'),
+  healthStatus:  $('healthStatus'),
+  blockedStatus: $('blockedStatus'),
+  footAnchor:    $('footAnchor'),
 
   // stage / health
   tRx:          $('tRx'),

@@ -3,13 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://unpkg.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'">
   <title>NetWatcher</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="vendor/maplibre-6.16.0/maplibre-gl.css">
   <link rel="stylesheet" href="style.css">
-  <script src="https://unpkg.com/topojson-client@3.1.0/dist/topojson-client.min.js" integrity="sha384-Ukv1p/xTma6P4/2bY5KzWBw+ydSpXmhCMtyciIQVDJ1RmOxtCYNMF1uXT9T63H67" crossorigin="anonymous"></script>
+  <script src="vendor/topojson-client.min.js" integrity="sha384-Ukv1p/xTma6P4/2bY5KzWBw+ydSpXmhCMtyciIQVDJ1RmOxtCYNMF1uXT9T63H67"></script>
 </head>
 <body class="density-compact">
 
@@ -44,7 +41,7 @@
       </div>
       <div class="ops-cell">
         <div class="l">Public</div>
-        <div class="v hot" id="hostPublicIP">—</div>
+        <div class="v" id="hostPublicIP">—</div>
       </div>
       <div class="ops-cell">
         <div class="l">Geo</div>
@@ -59,16 +56,16 @@
     <div class="clock">
       <div class="t" id="clockT">—</div>
       <div class="d" id="clockD">—</div>
-      <div class="state" id="statusText" role="status">connecting…</div>
+      <div class="state wait" id="statusText" role="status">Traffic · connecting…</div>
     </div>
   </header>
 
   <!-- ============ MAIN ============ -->
-  <div class="main">
+  <main class="main">
 
     <!-- LEFT: process queue -->
     <aside class="queue">
-      <button class="q-toggle" id="qToggle" title="Collapse process list" aria-label="Collapse">
+      <button class="q-toggle" id="qToggle" title="Collapse process list" aria-label="Collapse process list" aria-expanded="true" aria-controls="queue">
         <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
           <path id="qToggleIcon" d="M10 4 L5 8 L10 12"/>
         </svg>
@@ -83,7 +80,10 @@
       <div class="queue-head">
         <div class="title">
           <h2>Process list</h2>
+          <span id="queueSummary" class="panel-note">Your user’s connections</span>
         </div>
+
+        <p class="coverage-note">Connection snapshots with automatic IP location and reverse DNS. Brief connections and unconnected UDP can be missed.</p>
 
         <div class="queue-netinfo" id="queueNetInfo">
           <div class="qni-cell">
@@ -96,24 +96,32 @@
           </div>
         </div>
 
+        <p class="panel-note" id="hostStatus"></p>
         <div class="sortbar">
           <span class="sl">Sort by</span>
           <select id="sortSelect" aria-label="Sort processes">
             <option value="connections" selected>Connections</option>
+            <option value="rx">Download speed</option>
+            <option value="tx">Upload speed</option>
             <option value="pid">PID</option>
             <option value="name">Name</option>
           </select>
           <button class="toolbar-btn mini" id="refreshNowBtn" title="Refresh now" aria-label="Refresh now">↻</button>
           <select id="refreshSelect" class="refresh-select" title="Refresh interval" aria-label="Refresh interval">
             <option value="2000">2s</option>
-            <option value="10000">10s</option>
+            <option value="10000" selected>10s</option>
             <option value="30000">30s</option>
             <option value="60000">1m</option>
-            <option value="300000" selected>5m</option>
+            <option value="300000">5m</option>
             <option value="600000">10m</option>
           </select>
         </div>
 
+        <div class="monitor-controls">
+          <span id="listStatus" class="panel-note" role="status">Loading connection list…</span>
+          <button class="toolbar-btn" id="pauseBtn" aria-pressed="false" title="Freeze connection list and traffic samples. Firewall rules remain in place.">Pause connections</button>
+        </div>
+        <div id="queueError" class="queue-error-banner" role="alert" hidden></div>
         <div class="searchbar">
           <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
             <circle cx="7" cy="7" r="5"></circle><path d="M11 11l3.2 3.2"></path>
@@ -123,9 +131,9 @@
         </div>
 
         <div class="chips" id="chips">
-          <button class="chip on" data-f="sys">hide system</button>
-          <button class="chip on" data-f="v6">no ipv6</button>
-          <button class="chip on" data-f="priv">no private</button>
+          <button class="chip" data-f="sys" aria-pressed="false" title="Classification uses process names, not verified signatures">hide system labels</button>
+          <button class="chip" data-f="v6" aria-pressed="false">hide IPv6</button>
+          <button class="chip" data-f="priv" aria-pressed="false">hide private IPs</button>
           <button class="chip chip-icon" id="expandToggleChip" data-f="expandToggle" title="Expand all" aria-label="Expand all">
             <svg class="ic-expand" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
               <path d="M4 6 L8 10 L12 6"/>
@@ -148,13 +156,86 @@
       <span class="reg tl"></span><span class="reg tr"></span>
       <span class="reg bl"></span><span class="reg br"></span>
 
-      <div class="radar-wrap">
-        <canvas id="radar" aria-hidden="true"></canvas>
-        <div class="bearings" id="bearings"></div>
+      <section class="connection-map" id="connectionMap" aria-labelledby="mapTitle">
+        <header class="map-head">
+          <div><h2 id="mapTitle">Connection map</h2><p id="mapCoverage" class="panel-note">Waiting for connections…</p></div>
+          <div class="map-controls">
+            <button id="mapReset" class="toolbar-btn">World view</button>
+            <button id="mapExpand" class="toolbar-btn" aria-expanded="false" aria-controls="mapViewport">Enlarge</button>
+          </div>
+        </header>
+        <div class="map-viewport" id="mapViewport">
+          <div id="radar" aria-label="Connection geography. Targets are also available in the list below."></div>
+          <p id="radarStatus" class="map-notice" role="status">Loading map…</p>
+        </div>
+        <div class="map-caption"><span id="mapSampleStatus">Waiting for traffic samples</span><span>Point size: upload speed · approximate locations</span></div>
+        <div class="map-selection" id="mapSelectionBar" hidden>
+          <span id="mapSelectionLabel"></span>
+          <button id="mapInspect" class="toolbar-btn">Show processes</button>
+          <button id="mapClear" class="toolbar-btn">Clear selection</button>
+        </div>
+        <div class="map-target-head">
+          <span>Targets</span>
+          <div id="mapTargetScope" class="map-target-scope" role="group" aria-label="Target locations">
+            <button type="button" data-scope="all" aria-pressed="true">All</button>
+            <button type="button" data-scope="unknown" aria-pressed="false">Location unknown</button>
+          </div>
+          <span id="mapTargetCount" class="panel-note"></span>
+        </div>
+        <div id="mapTargets" class="map-targets" aria-label="Connection targets"></div>
+        <button id="mapMore" class="toolbar-btn map-more" hidden>Show more targets</button>
+      </section>
 
+      <p id="trafficStatus" class="panel-note traffic-status">All monitored traffic · waiting for samples</p>
+      <div class="throughput">
+        <div class="tp rx">
+          <div class="k">Download</div>
+          <div class="v tnum"><span id="tRx">—</span><span class="u">MiB/s</span></div>
+          <svg class="graph" viewBox="0 0 100 48" preserveAspectRatio="none" id="gRx"></svg>
+        </div>
+        <div class="tp tx">
+          <div class="k">Upload</div>
+          <div class="v tnum"><span id="tTx">—</span><span class="u">MiB/s</span></div>
+          <svg class="graph" viewBox="0 0 100 48" preserveAspectRatio="none" id="gTx"></svg>
+        </div>
+      </div>
+
+      <div class="stats-strip">
+        <div class="dial">
+          <span class="k">Shown processes</span>
+          <span class="v hot tnum" id="dProc">0</span>
+          <span class="sub"><span id="dProcSys">0</span> system-labeled · <span id="dProcUsr">0</span> other</span>
+        </div>
+        <div class="dial">
+          <span class="k">Shown connections</span>
+          <span class="v ice tnum" id="dConn">0</span>
+          <span class="sub" id="dConnSub">—</span>
+        </div>
+        <div class="dial">
+          <span class="k">Shown countries</span>
+          <span class="v tnum" id="dCtry">0</span>
+          <span class="sub" id="dCtrySub">0 service providers</span>
+        </div>
+      </div>
+
+      <aside class="blocked-panel">
+        <div class="blocked-head">
+          <h3>IP block rules <span class="cnt" id="blockedCntBig">0</span></h3>
+          <div class="actions">
+            <input id="blockedSearch" placeholder="filter IP, country, ISP" aria-label="Search blocked IPs" />
+            <button id="blockedExport">Export all</button>
+            <button id="blockedHistory" title="Open full history with bulk actions">History…</button>
+            <button id="blockedRetry">Check status</button>
+            <button class="primary" id="blockedAdd">+ Add IP</button>
+          </div>
+        </div>
+        <p id="blockedStatus" class="panel-note" role="status">Checking saved rules…</p>
+        <div class="blocked-body" id="blockedList"></div>
+      </aside>
+      <div class="support-panels">
         <div class="readouts left">
           <div class="readout" id="talkersReadout">
-            <div class="lbl"><span>Top talkers</span><span>cum.</span></div>
+            <div class="lbl"><span>Traffic by country</span><span>totals</span></div>
             <div id="talkersList">
               <div class="line"><span class="k">— no traffic —</span><span class="v"></span></div>
             </div>
@@ -163,7 +244,7 @@
 
         <div class="readouts right">
           <div class="readout" id="healthReadout">
-            <div class="lbl"><span>System health</span><span>sim</span></div>
+            <div class="lbl"><span>System health</span><span id="healthStatus">Loading…</span></div>
             <div class="line"><span class="k">CPU</span><span class="v" id="hCPU">—</span></div>
             <div class="hbar"><span id="hCPUbar" style="background:var(--ice)"></span></div>
             <div class="line"><span class="k">Memory</span><span class="v" id="hMem">—</span></div>
@@ -172,84 +253,24 @@
           </div>
         </div>
       </div>
-
-      <div class="throughput">
-        <div class="tp rx">
-          <div class="k">Download</div>
-          <div class="v tnum"><span id="tRx">0.00</span><span class="u">MB/s</span></div>
-          <svg class="graph" viewBox="0 0 100 48" preserveAspectRatio="none" id="gRx"></svg>
-        </div>
-        <div class="tp tx">
-          <div class="k">Upload</div>
-          <div class="v tnum"><span id="tTx">0.00</span><span class="u">MB/s</span></div>
-          <svg class="graph" viewBox="0 0 100 48" preserveAspectRatio="none" id="gTx"></svg>
-        </div>
-      </div>
-
-      <div class="stats-strip">
-        <div class="dial">
-          <span class="k">Processes</span>
-          <span class="v hot tnum" id="dProc">0</span>
-          <span class="sub"><span id="dProcSys">0</span> system · <span id="dProcUsr">0</span> user</span>
-        </div>
-        <div class="dial">
-          <span class="k">Connections</span>
-          <span class="v ice tnum" id="dConn">0</span>
-          <span class="sub" id="dConnSub">—</span>
-        </div>
-        <div class="dial">
-          <span class="k">Countries</span>
-          <span class="v tnum" id="dCtry">0</span>
-          <span class="sub" id="dCtrySub">across 0 ASN ranges</span>
-        </div>
-      </div>
-
-      <aside class="blocked-panel">
-        <div class="blocked-head">
-          <h3>Blocked IPs <span class="cnt" id="blockedCntBig">0</span></h3>
-          <div class="actions">
-            <input id="blockedSearch" placeholder="filter ip, host, reason" aria-label="Search blocked IPs" />
-            <button id="blockedExport">Export</button>
-            <button id="blockedHistory" title="Open full history with bulk actions">History…</button>
-            <button class="primary" id="blockedAdd">+ Add IP</button>
-          </div>
-        </div>
-        <div class="blocked-body" id="blockedList"></div>
-      </aside>
     </section>
 
-  </div>
+  </main>
 
   <!-- ============ FOOT ============ -->
   <footer class="foot">
     <div class="g">
-      <span>refresh · <b id="footRefresh">5m</b></span>
+      <span>refresh · <b id="footRefresh">10s</b></span>
       <span>sort · <b id="footSort">connections</b></span>
       <span>tz · <b id="footTz">—</b></span>
     </div>
     <div class="g">
       <span>anchor · <b>com.apple/250.netwatcher</b></span>
-      <span class="good" id="footAnchor">● loaded</span>
-      <span>blocked · <b id="footBlocked">0</b></span>
-      <span>press <b>T</b> · tweaks · <b>/</b> · find</span>
+      <span id="footAnchor">Table status unknown</span>
+      <span>rules · <b id="footBlocked">0</b></span>
+      <span>press <b>/</b> · find</span>
     </div>
   </footer>
-
-  <!-- ============ TWEAKS ============ -->
-  <aside class="tweaks" id="tweaks">
-    <h4>Tweaks <span class="kbd-lite">T</span></h4>
-    <div class="r">
-      <div class="l">Density</div>
-      <div class="seg" data-key="density">
-        <button data-v="compact" class="on">Compact</button>
-        <button data-v="comfortable">Comfortable</button>
-      </div>
-    </div>
-    <div class="r toggle on" id="twRadar">
-      <span>Radar sweep</span>
-      <span class="sw"></span>
-    </div>
-  </aside>
 
   <script type="module" src="js/main.js"></script>
 </body>

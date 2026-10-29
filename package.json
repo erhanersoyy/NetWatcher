@@ -10,7 +10,6 @@
     "url": "git+https://github.com/erhanersoyy/NetWatcher.git"
   },
   "scripts": {
-    "predev": "PIDS=$(lsof -ti:3847); if [ -n \"$PIDS\" ]; then echo \"freeing port 3847 (pids: $PIDS)\"; kill $PIDS 2>/dev/null; sleep 0.3; fi; exit 0",
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
@@ -18,12 +17,12 @@
     "test": "node --import tsx --test 'src/**/*.test.ts' 'public/**/*.test.js'"
   },
   "dependencies": {
-    "express": "^5.1.0"
+    "express": "^5.3.0"
   },
   "devDependencies": {
     "@types/express": "^5.0.0",
     "@types/node": "^22.0.0",
-    "tsx": "^4.19.0",
+    "tsx": "^4.23.15",
     "typescript": "^5.7.0"
   }
 }

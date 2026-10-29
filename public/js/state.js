@@ -9,10 +9,24 @@ export const S = {
   blockedMeta:      new Map(),   // ip -> { country, countryCode, isp, blockedAt }
   blocksStale:      false,
   staleCount:       0,
+  pfIPs:           null,
+  firewallStatus:  null,
+  blocksCheckedAt: 0,
+  historyFresh:    false,
+  historyError:    '',
+  historyData:     null,
   liveTraffic:      new Map(),   // trafficKey -> { bytesIn, bytesOut }
   streamHealthy:    false,
   lastDeltaAt:      0,
-  filter:           { sys: true, v6: true, priv: true, q: '' },
+  hasRateSample:    false,
+  streamConnectedAt: 0,
+  paused:          false,
+  monitorVersion:  0,
+  connectionsUpdatedAt: 0,
+  connectionsError: '',
+  filter:           { sys: false, v6: false, priv: false, q: '' },
+  mapSelection:    null,        // { ips, label }; independent of the text search
+  mapProcess:      null,        // process identity key highlighted on the map
   blockedQ:         '',
   expandedPids:     new Set(),
   prevPids:         null,
@@ -20,7 +34,7 @@ export const S = {
   lastRenderSig:    '',
   killsInFlight:    new Set(),
   refreshTimer:     null,
-  refreshIntervalMs: 300000,
+  refreshIntervalMs: 10000,
 };
 
 // ---------- EventTarget bus ----------

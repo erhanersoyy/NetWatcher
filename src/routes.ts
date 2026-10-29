@@ -2,14 +2,15 @@ import { Router } from 'express';
 import { networkInterfaces, hostname } from 'node:os';
 import { isIP } from 'node:net';
 import { getConnections } from './connections.js';
-import { lookupIPs, lookupSingleIP } from './geolocation.js';
-import { reverseLookupBatch } from './dns-resolver.js';
-import { getTrafficSnapshot, trafficKey } from './traffic.js';
-import { subscribeTrafficStream, getLatestTrafficStats } from './traffic-stream.js';
+import { enrichment } from './geolocation.js';
+import { trafficKey } from './traffic.js';
+import { subscribeTrafficStream, getLatestTrafficStats, getSamplerHealth } from './traffic-stream.js';
 import { getProcessMeta } from './process-info.js';
+import { getProcessIdentities } from './process-identity.js';
+import { processVerifier } from './process-verification.js';
 import { killProcess } from './process-kill.js';
 import { vtLookup } from './virustotal.js';
-import { blockIP, unblockIP, getBlockedIPsOrNull, reapplyBlocks } from './firewall.js';
+import { blockIP, unblockIP, getBlockedIPsOrNull, getFirewallStatus, reapplyBlocks } from './firewall.js';
 import { getBlockHistory, deleteBlockHistoryRow, countStaleBlocks } from './block-store.js';
 import { getBootId } from './boot-info.js';
 import { getSystemHealth } from './system-health.js';
@@ -18,36 +19,19 @@ import type { ProcessInfo, EnrichedConnection, HostInfo } from './types.js';
 
 export const router: ReturnType<typeof Router> = Router();
 
-/**
- * Coalesce concurrent `/api/connections` calls. `lsof` is the fixed-cost
- * hot path (100–500 ms on loaded boxes) and nothing stops two polls from
- * racing — the UI auto-refresh + a manual "refresh now" click will happily
- * spawn two lsof children in parallel. A short in-flight promise window
- * means the second caller attaches to the first request's result.
- *
- * 800 ms is well below the default 2 s UI poll and still short enough
- * that a manual refresh after a state change (kill/block) sees fresh data.
- */
-const CONN_COALESCE_WINDOW_MS = 800;
-let connInFlight: { promise: Promise<ProcessInfo[]>; startedAt: number } | null = null;
+// Share one collector run until it settles; slow callers cannot start overlapping lsof runs.
+let connInFlight: Promise<ProcessInfo[]> | null = null;
 
 async function buildConnectionsPayload(): Promise<ProcessInfo[]> {
+  const before = await getProcessIdentities();
   const connections = await getConnections();
 
-  // Collect unique remote IPs for batch geolocation + reverse DNS
+  // Schedule enrichment without awaiting external services.
   const uniqueIPs = [...new Set(connections.map((c) => c.remoteAddress))];
-  // Prefer the live stream's snapshot when a client is subscribed — it's
-  // always fresher than spawning a new one-shot. Fall back to a one-shot
-  // for non-browser consumers (curl, tests) where no stream is running.
-  const liveStats = getLatestTrafficStats();
-  const trafficPromise = liveStats.size > 0
-    ? Promise.resolve(liveStats)
-    : getTrafficSnapshot();
-  const [geoMap, dnsMap, trafficMap] = await Promise.all([
-    lookupIPs(uniqueIPs),
-    reverseLookupBatch(uniqueIPs),
-    trafficPromise,
-  ]);
+  const geoMap = new Map(uniqueIPs.map(ip => [ip, enrichment.geo(ip)]));
+  const domainMap = new Map(uniqueIPs.map(ip => [ip, enrichment.domain(ip)]));
+  const identities = await getProcessIdentities();
+  const trafficMap = getLatestTrafficStats();
 
   // Group by PID
   const processMap = new Map<number, ProcessInfo>();
@@ -61,6 +45,7 @@ async function buildConnectionsPayload(): Promise<ProcessInfo[]> {
         processName: conn.processName,
         description: meta.description,
         isSystemProcess: meta.isSystem,
+        identity: before.get(conn.pid)?.token === identities.get(conn.pid)?.token ? identities.get(conn.pid) ?? null : null,
         connections: [],
       };
       processMap.set(conn.pid, proc);
@@ -83,8 +68,9 @@ async function buildConnectionsPayload(): Promise<ProcessInfo[]> {
       localAddress: conn.localAddress,
       localPort: conn.localPort,
       state: conn.state,
-      geo: geoMap.get(conn.remoteAddress) ?? null,
-      domain: dnsMap.get(conn.remoteAddress) ?? '-',
+      geo: geoMap.get(conn.remoteAddress)?.value ?? null,
+      domain: domainMap.get(conn.remoteAddress)?.value ?? '-',
+      enrichment: { geo: geoMap.get(conn.remoteAddress)!.state, dns: domainMap.get(conn.remoteAddress)!.state },
       bytesIn: stats?.bytesIn,
       bytesOut: stats?.bytesOut,
       trafficKey: key,
@@ -92,22 +78,27 @@ async function buildConnectionsPayload(): Promise<ProcessInfo[]> {
     proc.connections.push(enriched);
   }
 
+  // Only file metadata is awaited here. Codesign/hash run in a bounded queue;
+  // subsequent connection polls pick up completed verification automatically.
+  const processes = [...processMap.values()];
+  await Promise.all(processes.map(async proc => {
+    proc.verification = await processVerifier.inspect(proc.identity);
+  }));
   // No server-side sort — client controls sort order
-  return [...processMap.values()];
+  return processes;
 }
 
 router.get('/api/connections', async (_req, res) => {
-  const now = Date.now();
-  if (!connInFlight || now - connInFlight.startedAt > CONN_COALESCE_WINDOW_MS) {
+  if (!connInFlight) {
     const promise = buildConnectionsPayload().finally(() => {
       // Clear only if this entry is still the current one — a later poll
       // may have already replaced it, and we don't want to null that out.
-      if (connInFlight && connInFlight.promise === promise) connInFlight = null;
+      if (connInFlight === promise) connInFlight = null;
     });
-    connInFlight = { promise, startedAt: now };
+    connInFlight = promise;
   }
   try {
-    const result = await connInFlight.promise;
+    const result = await connInFlight;
     res.json(result);
   } catch (err) {
     res.status(500).json({ success: false, message: (err as Error).message });
@@ -115,8 +106,8 @@ router.get('/api/connections', async (_req, res) => {
 });
 
 router.post('/api/kill/:pid', async (req, res) => {
-  const pid = parseInt(req.params.pid, 10);
-  const result = await killProcess(pid);
+  const pid = /^\d+$/.test(req.params.pid) ? Number(req.params.pid) : NaN;
+  const result = await killProcess(pid, req.body?.identityToken);
   res.status(result.success ? 200 : 400).json(result);
 });
 
@@ -142,8 +133,7 @@ router.post('/api/unblock/:ip', async (req, res) => {
 
 router.post('/api/reapply', async (req, res) => {
   const password = typeof req.body?.password === 'string' ? req.body.password : '';
-  const ips = (await getBlockHistory()).active.map((r) => r.ip);
-  const result = await reapplyBlocks(ips, password);
+  const result = await reapplyBlocks(password);
   res.status(result.success ? 200 : 400).json(result);
 });
 
@@ -154,9 +144,8 @@ router.post('/api/reapply', async (req, res) => {
  *
  * Backed by the traffic-stream singleton: the persistent `nettop` child
  * is spawned on first subscribe and torn down shortly after the last
- * client disconnects. CSRF-exempt because SSE is a read-only GET and
- * EventSource can't send custom headers; the Host/Origin allowlist in
- * `index.ts` still gates the request.
+ * client disconnects. A session cookie is mandatory, including on SSE. EventSource cannot send
+ * the custom CSRF header; exact Host/Origin checks remain in app.ts.
  */
 router.get('/api/traffic-stream', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -166,16 +155,15 @@ router.get('/api/traffic-stream', (req, res) => {
   if (typeof res.flushHeaders === 'function') res.flushHeaders();
 
   const unsubscribe = subscribeTrafficStream((delta) => {
-    // Express' res.write returns false on backpressure; we still want to
-    // keep writing — EventSource will handle its own buffering.
-    res.write(`event: delta\ndata: ${JSON.stringify(delta)}\n\n`);
+    // Bound slow-client buffering; EventSource can reconnect with a fresh baseline.
+    if (!res.write(`event: delta\ndata: ${JSON.stringify(delta)}\n\n`)) res.destroy();
   });
 
-  // Comment frames keep proxies / the browser from timing the connection
-  // out during long idle periods (no traffic = no deltas).
-  const keepalive = setInterval(() => {
-    res.write(': keepalive\n\n');
-  }, 25000);
+  const sendHealth = () => {
+    if (!res.write(`event: health\ndata: ${JSON.stringify(getSamplerHealth())}\n\n`)) res.destroy();
+  };
+  sendHealth();
+  const keepalive = setInterval(sendHealth, 2000);
 
   const cleanup = (): void => {
     clearInterval(keepalive);
@@ -194,6 +182,8 @@ router.get('/api/system-health', async (_req, res) => {
     res.status(500).json({ success: false, message: (err as Error).message });
   }
 });
+
+router.get('/api/firewall-status', async (_req, res) => { res.json(await getFirewallStatus()); });
 
 router.get('/api/blocked', async (_req, res) => {
   // Returns the authoritative IP array when pfctl is readable, or JSON `null`
@@ -252,30 +242,9 @@ router.delete('/api/block-history/:ip', async (req, res) => {
   res.status(result.success ? 200 : 400).json(result);
 });
 
-let cachedHostInfo: { data: HostInfo; timestamp: number } | null = null;
-const HOST_INFO_TTL = 5 * 60 * 1000; // 5 minutes
-
 router.get('/api/host-info', async (req, res) => {
-  const bypassCache = req.query.fresh === '1';
-  if (!bypassCache && cachedHostInfo && Date.now() - cachedHostInfo.timestamp < HOST_INFO_TTL) {
-    res.json(cachedHostInfo.data);
-    return;
-  }
-
   // Get local IP (prefers en*, skips VPN/Docker/virtual interfaces)
   const localIP = pickPrimaryIPv4(networkInterfaces());
-
-  // Get public IP
-  let publicIP = 'Unknown';
-  let geo = null;
-  try {
-    const ipRes = await fetch('https://api.ipify.org?format=json', { signal: AbortSignal.timeout(5000) });
-    const ipData = await ipRes.json() as { ip: string };
-    publicIP = ipData.ip;
-    geo = await lookupSingleIP(publicIP);
-  } catch { /* ignore */ }
-
-  const info: HostInfo = { localIP, publicIP, hostname: hostname(), geo };
-  cachedHostInfo = { data: info, timestamp: Date.now() };
+  const info: HostInfo = { localIP, hostname: hostname(), ...await enrichment.host(req.query.fresh === '1') };
   res.json(info);
 });

@@ -1,75 +1,73 @@
-/* ============================================================
-   NetWatcher — wiring real API to the Radar Room redesign
-   ============================================================ */
-
+import { establishSession, showSessionRequired } from './session.js';
 import { el } from './dom.js';
-import { S } from './state.js';
-import { fetchConnections, fetchHostInfo, fetchBlockedIPs } from './api.js';
+import { S, emit } from './state.js';
+import { fetchConnections, fetchHostInfo, fetchBlockedIPs, updateListStatus } from './api.js';
 import { initRadar } from './radar.js';
 import { initPanels } from './panels.js';
 import { initBlockedPanel } from './modals.js';
 import { initActions } from './actions.js';
 import { initConnectionList } from './connection-list.js';
-import { connectTrafficStream } from './sse.js';
+import { connectTrafficStream, disconnectTrafficStream } from './sse.js';
 
-// ---------- DOM ----------
-const {
-  statusText, refreshSelect, refreshNowBtn,
-  qEl,
-  footRefresh,
-} = el;
+if (await establishSession()) {
 
-// ---------- Keyboard
 document.addEventListener('keydown', (e) => {
-  const tag = document.activeElement?.tagName;
-  if (tag === 'INPUT' || tag === 'TEXTAREA') return;
-  if (e.key === '/') { e.preventDefault(); qEl.focus(); }
-  else if (e.key.toLowerCase() === 't') {
-    document.body.classList.toggle('tweaks-on');
-  }
+  if (e.ctrlKey || e.metaKey || e.altKey || document.querySelector('dialog[open]')) return;
+  if (document.activeElement?.matches('input, textarea, select, [contenteditable="true"]')) return;
+  if (e.key === '/') { e.preventDefault(); el.qEl.focus(); }
 });
 
-// ---------- Firewall / VT / Kill ----------
-// (lockBtn, blockIPAction, unblockIPAction, killProcessAction, doKill,
-//  vtCheckAction, blockIPManualAction, unblockBulkAction,
-//  showBlockedListModal, renderBlockedListBody, wireBlockedToolbar,
-//  buildBlockedRows — all moved to actions.js)
-
-// ---------- Refresh orchestration ----------
-async function refreshAll({ fresh } = { fresh: false }) {
-  await Promise.all([fetchConnections(), fetchHostInfo({ fresh }), fetchBlockedIPs()]);
+let refreshing = false;
+async function refreshAll({ fresh = false, force = false } = {}) {
+  if (refreshing) return;
+  refreshing = true;
+  el.refreshNowBtn.disabled = true;
+  el.refreshNowBtn.classList.add('spinning');
+  try {
+    await Promise.all([fetchConnections({ force }), fetchHostInfo({ fresh }), fetchBlockedIPs()]);
+  } finally {
+    refreshing = false;
+    el.refreshNowBtn.disabled = false;
+    el.refreshNowBtn.classList.remove('spinning');
+  }
 }
 function scheduleRefresh() {
-  if (S.refreshTimer) { clearInterval(S.refreshTimer); S.refreshTimer = null; }
-  if (S.refreshIntervalMs > 0) S.refreshTimer = setInterval(() => refreshAll({ fresh: false }), S.refreshIntervalMs);
+  clearInterval(S.refreshTimer);
+  S.refreshTimer = setInterval(() => {
+    if (!S.paused && !document.hidden) fetchConnections();
+  }, S.refreshIntervalMs);
 }
-refreshSelect.addEventListener('change', () => {
-  S.refreshIntervalMs = parseInt(refreshSelect.value, 10) || 2000;
-  footRefresh.textContent = refreshSelect.options[refreshSelect.selectedIndex].textContent;
+el.refreshSelect.addEventListener('change', () => {
+  S.refreshIntervalMs = Number(el.refreshSelect.value);
+  el.footRefresh.textContent = el.refreshSelect.selectedOptions[0].textContent;
   scheduleRefresh();
 });
-refreshNowBtn.addEventListener('click', async () => {
-  refreshNowBtn.classList.add('spinning');
-  try { await refreshAll({ fresh: true }); }
-  finally { refreshNowBtn.classList.remove('spinning'); }
+el.refreshNowBtn.addEventListener('click', () => refreshAll({ fresh: true, force: true }));
+el.pauseBtn.addEventListener('click', () => {
+  S.paused = !S.paused;
+  S.monitorVersion++;
+  el.pauseBtn.textContent = S.paused ? 'Resume connections' : 'Pause connections';
+  el.pauseBtn.setAttribute('aria-pressed', String(S.paused));
+  if (S.paused) disconnectTrafficStream();
+  else { connectTrafficStream(); fetchConnections(); }
+  updateListStatus();
+  emit('stream:changed');
 });
-
-// Initial foot text sync
-footRefresh.textContent = refreshSelect.options[refreshSelect.selectedIndex].textContent;
-
-// ---------- Bus subscriptions ----------
-// blocked:changed is now owned by modals.js (registered inside initBlockedPanel())
-// host:changed is now owned by radar.js (registered inside initRadar())
-// data:changed is now owned by connection-list.js (registered inside initConnectionList())
-
-// ---------- Init ----------
-statusText.classList.add('wait');
-statusText.textContent = 'connecting…';
+el.footRefresh.textContent = el.refreshSelect.selectedOptions[0].textContent;
 initRadar();
 initPanels();
 initBlockedPanel();
 initActions();
 initConnectionList();
 connectTrafficStream();
-refreshAll({ fresh: true });
+refreshAll();
 scheduleRefresh();
+// Host enrichment and firewall checks do not need the list's fast cadence.
+setInterval(() => {
+  if (!document.hidden) { fetchHostInfo(); fetchBlockedIPs(); }
+}, 60000);
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && !S.paused) fetchConnections();
+});
+
+} else { showSessionRequired(); }

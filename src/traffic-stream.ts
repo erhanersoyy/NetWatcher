@@ -34,6 +34,14 @@ const subscribers = new Set<Subscriber>();
 let sampleTimer: NodeJS.Timeout | null = null;
 let stopTimer: NodeJS.Timeout | null = null;
 let sampleInFlight = false;
+let lastSampleAt = 0;
+let sampleError: string | null = null;
+let pendingSampleSeen = false;
+
+export function getSamplerHealth() {
+  return { healthy: lastSampleAt > 0 && Date.now() - lastSampleAt < 4000 && !sampleError, lastSampleAt: lastSampleAt || null,
+    error: sampleError, mode: continuousChild ? 'continuous' : sampleTimer ? 'snapshot' : 'stopped' };
+}
 
 // Continuous sampler state (nettop running inside a PTY via script(1))
 let continuousChild: ChildProcess | null = null;
@@ -61,7 +69,7 @@ async function tickOneShot(): Promise<void> {
     const snap = await getTrafficSnapshot(SNAPSHOT_TIMEOUT_MS);
     flushSample(snap);
   } catch (err) {
-    console.error('[traffic-stream] one-shot snapshot failed:', err);
+    sampleError = err instanceof Error ? err.message : 'Traffic sampler failed';
   } finally {
     sampleInFlight = false;
   }
@@ -74,6 +82,8 @@ async function tickOneShot(): Promise<void> {
  */
 function flushSample(snap: Map<string, SnapshotStats>): void {
   const now = Date.now();
+  lastSampleAt = now;
+  sampleError = null;
   const delta: TrafficDelta[] = [];
 
   for (const [key, s] of snap) {
@@ -91,7 +101,7 @@ function flushSample(snap: Map<string, SnapshotStats>): void {
     if (!snap.has(key)) latest.delete(key);
   }
 
-  if (delta.length === 0 || subscribers.size === 0) return;
+  if (subscribers.size === 0) return;
   for (const sub of subscribers) {
     try {
       sub(delta);
@@ -164,9 +174,11 @@ function startContinuousSampler(): boolean {
     for (const raw of complete.split('\n')) {
       const line = raw.trim();
       if (!line) continue;
+      if (line.includes('bytes_in') && line.includes('bytes_out')) pendingSampleSeen = true;
       if (!/^(tcp4|tcp6|udp4|udp6) /i.test(line)) continue;
       const parsed = parseConnectionLine(line);
       if (!parsed) continue;
+      pendingSampleSeen = true;
       // Within one sample, nettop may report the same 5-tuple across
       // multiple PIDs — sum them. Cross-sample replacement happens in
       // flushSample() via the diff against `latest`.
@@ -184,7 +196,8 @@ function startContinuousSampler(): boolean {
     if (continuousFlushTimer) clearTimeout(continuousFlushTimer);
     continuousFlushTimer = setTimeout(() => {
       continuousFlushTimer = null;
-      if (pendingSample.size === 0) return;
+      if (!pendingSampleSeen) return;
+      pendingSampleSeen = false;
       const sample = pendingSample;
       pendingSample = new Map();
       flushSample(sample);
@@ -227,11 +240,13 @@ function stopContinuousSampler(): void {
   }
   continuousBuffer = '';
   pendingSample = new Map();
+  pendingSampleSeen = false;
 }
 
 /** Permanently disable continuous mode for the rest of the process and
  *  spin up the one-shot fallback if subscribers are still connected. */
 function failContinuousSampler(): void {
+  sampleError = 'Continuous sampler unavailable; trying snapshot fallback';
   continuousDisabled = true;
   stopContinuousSampler();
   if (subscribers.size > 0 && !sampleTimer) {
@@ -262,6 +277,8 @@ function startSampling(): void {
 function stopSampling(): void {
   stopOneShotSampler();
   stopContinuousSampler();
+  lastSampleAt = 0;
+  latest.clear();
   console.log('[traffic-stream] sampling stopped');
 }
 
@@ -284,7 +301,7 @@ export function subscribeTrafficStream(sub: Subscriber): () => void {
   if (!sampleTimer && !continuousChild) startSampling();
 
   queueMicrotask(() => {
-    if (!subscribers.has(sub) || latest.size === 0) return;
+    if (!subscribers.has(sub) || !getSamplerHealth().healthy || latest.size === 0) return;
     const snapshot: TrafficDelta[] = [];
     for (const [key, s] of latest) {
       snapshot.push({ key, bytesIn: s.bytesIn, bytesOut: s.bytesOut });
@@ -309,7 +326,7 @@ export function subscribeTrafficStream(sub: Subscriber): () => void {
 
 /** Snapshot accessor (used by `/api/connections` for merging). */
 export function getLatestTrafficStats(): Map<string, TrafficStats> {
-  return latest;
+  return getSamplerHealth().healthy ? latest : new Map();
 }
 
 /**

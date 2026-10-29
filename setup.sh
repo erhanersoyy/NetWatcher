@@ -127,4 +127,4 @@ printf "   %sBlock / Unblock prompts for your sudo password on each use — no s
 
 echo
 info "Setup complete."
-printf "   Start the dev server: %spnpm dev%s  (then open http://localhost:3847)\n" "$GREEN" "$RESET"
+printf "   Start the dev server: %spnpm dev%s  (then open the private access link printed by the server)\n" "$GREEN" "$RESET"

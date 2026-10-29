@@ -1,48 +1,18 @@
-import express, { type Request, type Response, type NextFunction } from 'express';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
-import { router } from './routes.js';
+import { randomBytes } from 'node:crypto';
+import { createApp } from './app.js';
 import { shutdownTrafficStream } from './traffic-stream.js';
+import { processVerifier } from './process-verification.js';
+import { enrichment } from './geolocation.js';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const app = express();
+if (process.getuid?.() === 0) {
+  console.error('Run NetWatcher as your normal user, not as root. Only individual firewall actions use sudo.');
+  process.exit(1);
+}
+
 const PORT = 3847;
 const HOST = '127.0.0.1';
-const ALLOWED_ORIGIN = `http://localhost:${PORT}`;
-const ALLOWED_ORIGIN_LOOPBACK = `http://127.0.0.1:${PORT}`;
-const ALLOWED_HOSTS = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`]);
-
-app.use(express.json());
-
-app.use('/api', (req: Request, res: Response, next: NextFunction) => {
-  // Host header allowlist — defeats DNS rebinding. A malicious page that
-  // rebinds attacker.example -> 127.0.0.1 still sends Host: attacker.example.
-  const host = req.headers.host;
-  if (!host || !ALLOWED_HOSTS.has(host)) {
-    res.status(403).json({ success: false, message: 'Forbidden host' });
-    return;
-  }
-  const origin = req.headers.origin;
-  if (origin && origin !== ALLOWED_ORIGIN && origin !== ALLOWED_ORIGIN_LOOPBACK) {
-    res.status(403).json({ success: false, message: 'Forbidden origin' });
-    return;
-  }
-  // Require custom header on all /api/* routes, not just mutations. GETs
-  // like /api/host-info leak data; requiring a non-simple header forces a
-  // CORS preflight, which the Origin allowlist above rejects. SSE is
-  // exempt because EventSource cannot send custom headers — the Host +
-  // Origin checks above remain its defense.
-  if (req.path !== '/traffic-stream') {
-    if (req.headers['x-requested-by'] !== 'netwatcher') {
-      res.status(403).json({ success: false, message: 'Missing CSRF header' });
-      return;
-    }
-  }
-  next();
-});
-
-app.use(express.static(join(__dirname, '..', 'public')));
-app.use(router);
+const accessKey = randomBytes(32).toString('base64url');
+const app = createApp(accessKey);
 
 const server = app.listen(PORT, HOST, () => {
   // Defense-in-depth: refuse to run if we somehow ended up bound to a
@@ -60,7 +30,7 @@ const server = app.listen(PORT, HOST, () => {
     console.error(`NetWatcher refused to start: bound to ${addr.address}, expected ${HOST}`);
     process.exit(1);
   }
-  console.log(`\n  NetWatcher running at http://${HOST}:${PORT}\n`);
+  console.log(`\n  NetWatcher access link (keep private): http://${HOST}:${PORT}/#access=${accessKey}\n`);
 });
 
 server.on('error', (err) => {
@@ -83,7 +53,9 @@ function shutdown(signal: NodeJS.Signals): void {
   shuttingDown = true;
   console.log(`\n  ${signal} received — shutting down…`);
   shutdownTrafficStream();
-  // Express 5 doesn't auto-drop open keep-alive sockets; force them first
+  processVerifier.shutdown();
+  enrichment.shutdown();
+  // Close open keep-alive sockets; force them first
   // so `server.close()` can actually complete instead of hanging on idle
   // keep-alives / long-lived SSE streams.
   if (typeof server.closeAllConnections === 'function') {

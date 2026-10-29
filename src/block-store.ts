@@ -2,6 +2,7 @@ import { readFile, writeFile, mkdir, rename } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { BlockRecord, BlockEvent, BlockHistoryResponse } from './types.js';
+import { canonicalIP } from './ip-address.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // src/ (dev via tsx) or dist/ (built) → ../data at project root. Overridable
@@ -39,9 +40,9 @@ async function readStore(): Promise<StoreShape> {
 
 async function writeStore(data: StoreShape): Promise<void> {
   const path = storePath();
-  await mkdir(dirname(path), { recursive: true });
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const tmp = path + '.tmp';
-  await writeFile(tmp, JSON.stringify(data, null, 2) + '\n', 'utf8');
+  await writeFile(tmp, JSON.stringify(data, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 });
   await rename(tmp, path);
 }
 
@@ -60,6 +61,8 @@ export function recordBlock(
 ): Promise<void> {
   return serialize(async () => {
     const store = await readStore();
+    // Reuse a legacy spelling so its history stays one continuous sequence.
+    ip = Object.keys(store.active).find(key => canonicalIP(key) === canonicalIP(ip)) ?? canonicalIP(ip);
     const at = Date.now();
     const country = meta.country ?? null;
     const countryCode = meta.countryCode ?? null;
@@ -73,16 +76,21 @@ export function recordBlock(
 export function recordUnblock(ip: string): Promise<void> {
   return serialize(async () => {
     const store = await readStore();
-    const prev = store.active[ip];
-    delete store.active[ip];
-    store.history.push({
-      ip,
-      action: 'unblock',
-      at: Date.now(),
-      country: prev?.country ?? null,
-      countryCode: prev?.countryCode ?? null,
-      isp: prev?.isp ?? null,
-    });
+    const aliases = Object.keys(store.active).filter(key => canonicalIP(key) === canonicalIP(ip));
+    // Removing a PF entry must also remove every saved spelling of that entry,
+    // otherwise re-apply could unexpectedly restore the same address.
+    for (const key of aliases.length ? aliases : [canonicalIP(ip)]) {
+      const prev = store.active[key];
+      delete store.active[key];
+      store.history.push({
+        ip: key,
+        action: 'unblock',
+        at: Date.now(),
+        country: prev?.country ?? null,
+        countryCode: prev?.countryCode ?? null,
+        isp: prev?.isp ?? null,
+      });
+    }
     await writeStore(store);
   });
 }
@@ -94,9 +102,9 @@ export function markReapplied(ips: string[], bootId: number): Promise<void> {
   return serialize(async () => {
     const store = await readStore();
     let changed = false;
-    for (const ip of ips) {
-      const rec = store.active[ip];
-      if (rec) { rec.appliedBoot = bootId; changed = true; }
+    const addresses = new Set(ips.map(canonicalIP));
+    for (const [ip, rec] of Object.entries(store.active)) {
+      if (addresses.has(canonicalIP(ip))) { rec.appliedBoot = bootId; changed = true; }
     }
     if (changed) await writeStore(store);
   });

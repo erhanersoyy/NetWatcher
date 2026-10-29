@@ -1,39 +1,22 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { getProcessIdentities } from './process-identity.js';
+import type { ActionResult } from './types.js';
 
-const execFileAsync = promisify(execFile);
-
-export async function killProcess(pid: number): Promise<{ success: boolean; message: string }> {
-  if (!Number.isInteger(pid) || pid <= 0) {
-    return { success: false, message: 'Invalid PID' };
-  }
-
-  // Verify process exists and belongs to current user.
-  // Compare numeric uid (not username) — macOS `ps -o user=` truncates long
-  // names to 8 chars, which could cause false mismatches.
-  const currentUid = process.getuid?.();
-  if (currentUid === undefined) {
-    return { success: false, message: 'Cannot determine current user' };
-  }
-
-  try {
-    const { stdout } = await execFileAsync('ps', ['-p', String(pid), '-o', 'uid=']);
-    const ownerUid = parseInt(stdout.trim(), 10);
-    if (!Number.isInteger(ownerUid)) {
-      return { success: false, message: 'Process not found' };
-    }
-    if (ownerUid !== currentUid) {
-      return { success: false, message: 'Cannot kill process owned by another user' };
-    }
-  } catch {
-    return { success: false, message: 'Process not found' };
-  }
-
-  try {
-    process.kill(pid, 'SIGTERM');
-    return { success: true, message: `Sent SIGTERM to PID ${pid}` };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'Failed to kill process';
-    return { success: false, message };
-  }
+export async function killProcess(pid: number, expectedToken: unknown, deps = {
+  identities: getProcessIdentities,
+  uid: () => process.getuid?.(),
+  selfPid: process.pid,
+  kill: (target: number): void => { process.kill(target, 'SIGTERM'); },
+}): Promise<ActionResult> {
+  if (!Number.isSafeInteger(pid) || pid <= 1 || pid === deps.selfPid) return { success: false, message: 'Invalid or protected PID' };
+  if (typeof expectedToken !== 'string' || !/^[\da-f]{64}$/.test(expectedToken)) return { success: false, message: 'Process identity required; refresh the connection list' };
+  const currentUid = deps.uid();
+  if (currentUid === undefined) return { success: false, message: 'Cannot determine current user' };
+  const identity = (await deps.identities(pid)).get(pid);
+  if (!identity) return { success: false, message: 'Process identity unavailable; no signal sent' };
+  if (identity.uid !== currentUid) return { success: false, message: 'Cannot kill process owned by another user' };
+  if (identity.token !== expectedToken) return { success: false, message: 'Process identity changed; refresh before trying again' };
+  // ps + kill is not an atomic kernel operation. This reduces stale-PID risk;
+  // it cannot guarantee that the PID will not be reused between these calls.
+  try { deps.kill(pid); return { success: true, message: `Sent SIGTERM to PID ${pid}` }; }
+  catch { return { success: false, message: 'Could not signal the process; it may have already exited' }; }
 }

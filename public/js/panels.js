@@ -1,17 +1,33 @@
 /* ============================================================
    NetWatcher — Panels subsystem
-   Owns: throughput graph, system-health bars, clock, tweaks panel.
+   Owns: throughput graph, system-health bars, clock.
    ============================================================ */
 
 import { el } from './dom.js';
 import { fmtBytes } from './util.js';
 import { apiFetch } from './api.js';
-import { setRadarOn } from './radar.js';
+import { S, on } from './state.js';
 
 const { tRx, tTx, gRx, gTx, hCPU, hCPUbar, hMem, hMembar, hLoad, clockT, clockD, footTz } = el;
 
 // ---------- Throughput history ----------
 let rxHistory = Array(40).fill(0), txHistory = Array(40).fill(0);
+
+export function clearThroughput() {
+  tRx.textContent = tTx.textContent = '—';
+  gRx.replaceChildren(); gTx.replaceChildren();
+  rxHistory = Array(40).fill(0); txHistory = Array(40).fill(0);
+}
+
+function updateStreamStatus() {
+  const recent = S.hasRateSample && S.lastDeltaAt && Date.now() - S.lastDeltaAt < 3000;
+  el.statusText.textContent = S.paused ? 'Traffic · paused' : S.streamHealthy ? 'Traffic sampler · receiving' : 'Traffic sampler · unverified';
+  el.statusText.classList.toggle('wait', S.paused || !recent);
+  el.statusText.classList.toggle('err', !S.paused && !S.streamHealthy);
+  el.trafficStatus.textContent = 'All monitored traffic · ' + (S.paused ? 'paused snapshot' : !S.streamHealthy
+    ? 'no verified recent sample' : recent ? 'sampled rate · recent samples' : 'no recent samples (idle or unavailable)');
+  if (!S.paused && (!recent || !S.streamHealthy)) clearThroughput();
+}
 
 export function pushThroughput(rxBps, txBps) {
   rxHistory.push(rxBps); rxHistory.shift();
@@ -56,8 +72,9 @@ async function refreshSystemHealth() {
     }
     const [l1, l5, l15] = h.load;
     hLoad.textContent = `${l1.toFixed(2)} / ${l5.toFixed(2)} / ${l15.toFixed(2)}`;
+    el.healthStatus.textContent = `Checked ${new Date().toLocaleTimeString()}`;
   } catch {
-    // leave previous values in place on transient failure
+    el.healthStatus.textContent = 'Unavailable · values may be old';
   }
 }
 
@@ -70,24 +87,10 @@ function tickClock() {
   clockD.textContent = `${p(d.getDate())} ${month} ${d.getFullYear()}`;
 }
 
-// ---------- Tweaks ----------
-const TWEAKS = JSON.parse(localStorage.getItem('nw-tweaks') || 'null') || { density: 'compact', radar: true };
-
-function applyTweaks() {
-  document.body.classList.toggle('density-compact', TWEAKS.density === 'compact');
-  document.body.classList.toggle('density-comfortable', TWEAKS.density === 'comfortable');
-  document.body.classList.toggle('radar-off', !TWEAKS.radar);
-  setRadarOn(TWEAKS.radar !== false);
-  for (const seg of document.querySelectorAll('.tweaks .seg')) {
-    const k = seg.dataset.key;
-    for (const b of seg.querySelectorAll('button')) b.classList.toggle('on', b.dataset.v === TWEAKS[k]);
-  }
-  document.getElementById('twRadar').classList.toggle('on', !!TWEAKS.radar);
-  localStorage.setItem('nw-tweaks', JSON.stringify(TWEAKS));
-}
-
 // ---------- initPanels: top-level setup called from main.js ----------
 export function initPanels() {
+  on('stream:changed', updateStreamStatus);
+  setInterval(updateStreamStatus, 1000);
   // Clock
   setInterval(tickClock, 1000); tickClock();
   footTz.textContent = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -99,17 +102,10 @@ export function initPanels() {
     refreshSystemHealth();
   }, 2200);
 
-  // Tweaks handlers
-  document.querySelectorAll('.tweaks .seg').forEach(seg => {
-    seg.addEventListener('click', (e) => {
-      const b = e.target.closest('button'); if (!b) return;
-      TWEAKS[seg.dataset.key] = b.dataset.v;
-      applyTweaks();
-    });
-  });
-  document.getElementById('twRadar').addEventListener('click', () => {
-    TWEAKS.radar = !TWEAKS.radar;
-    applyTweaks();
-  });
-  applyTweaks();
+  // Preserve the existing density preference; the retired radar-off preference is ignored.
+  try {
+    const saved = JSON.parse(localStorage.getItem('nw-tweaks') || 'null');
+    document.body.classList.toggle('density-comfortable', saved?.density === 'comfortable');
+    document.body.classList.toggle('density-compact', saved?.density !== 'comfortable');
+  } catch { /* Keep the default density. */ }
 }

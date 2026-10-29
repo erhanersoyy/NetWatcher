@@ -1,9 +1,9 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { recordBlock, markReapplied, getBlockHistory, countStaleBlocks } from './block-store.js';
+import { recordBlock, recordUnblock, markReapplied, getBlockHistory, countStaleBlocks } from './block-store.js';
 import type { BlockRecord } from './types.js';
 
 // storePath() reads NETWATCHER_DATA_DIR lazily, so pointing it at a temp dir
@@ -36,6 +36,7 @@ test('countStaleBlocks: previous-boot and undefined markers count as stale', () 
 
 test('recordBlock persists appliedBoot; markReapplied updates only named IPs', async () => {
   await recordBlock('1.1.1.1', { country: null }, 50);
+  assert.equal((await stat(join(dir, 'blocks.json'))).mode & 0o777, 0o600);
   await recordBlock('2.2.2.2', { country: null }, 50);
   let active = (await getBlockHistory()).active;
   assert.equal(active.find((r) => r.ip === '1.1.1.1')?.appliedBoot, 50);
@@ -44,4 +45,25 @@ test('recordBlock persists appliedBoot; markReapplied updates only named IPs', a
   active = (await getBlockHistory()).active;
   assert.equal(active.find((r) => r.ip === '1.1.1.1')?.appliedBoot, 77);
   assert.equal(active.find((r) => r.ip === '2.2.2.2')?.appliedBoot, 50);
+});
+
+test('legacy IPv6 aliases cannot survive unblock and be restored by re-apply', async () => {
+  const expanded = '2001:0DB8:0:0:0:0:0:ABCD', ip = '2001:db8::abcd';
+  const legacy = { ...rec(expanded, 50), blockedAt: 1 };
+  await writeFile(join(dir, 'blocks.json'), JSON.stringify({
+    active: { [expanded]: legacy }, history: [{ ip: expanded, action: 'block', at: 1, country: null }],
+  }));
+  await markReapplied([ip], 77);
+  assert.equal((await getBlockHistory()).active[0].appliedBoot, 77);
+  await recordBlock(ip, { country: null }, 77);
+  assert.deepEqual((await getBlockHistory()).active.map(row => row.ip), [expanded]);
+  // Older stores could contain both spellings. Unblock must remove both.
+  const store = await getBlockHistory();
+  await writeFile(join(dir, 'blocks.json'), JSON.stringify({
+    active: { [expanded]: store.active[0], [ip]: rec(ip, 50) }, history: store.history,
+  }));
+  await recordUnblock(ip);
+  const result = await getBlockHistory();
+  assert.deepEqual(result.active, []);
+  assert.deepEqual(new Set(result.history.filter(row => row.action === 'unblock').map(row => row.ip)), new Set([expanded, ip]));
 });

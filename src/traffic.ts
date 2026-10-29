@@ -97,27 +97,29 @@ export function parseConnectionLine(line: string): {
  * the connection lines, keyed for merging with lsof-derived connections.
  */
 export function getTrafficSnapshot(timeoutMs = 3000): Promise<Map<string, TrafficStats>> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const result = new Map<string, TrafficStats>();
     let settled = false;
     let buffer = '';
 
-    const finish = () => {
+    const finish = (error?: Error) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       try { child.kill('SIGKILL'); } catch { /* ignore */ }
-      resolve(result);
+      if (error) reject(error);
+      else resolve(result);
     };
 
     const child = spawn('nettop', ['-L', '1', '-nx', '-J', 'bytes_in,bytes_out'], {
       stdio: ['ignore', 'pipe', 'ignore'],
     });
 
-    const timer = setTimeout(finish, timeoutMs);
+    const timer = setTimeout(() => finish(new Error('nettop sample timed out')), timeoutMs);
 
-    child.on('error', finish);
-    child.on('close', () => {
+    child.on('error', () => finish(new Error('nettop unavailable')));
+    child.on('close', code => {
+      if (code !== 0) { finish(new Error('nettop sample failed')); return; }
       processBuffer(buffer, result, true);
       finish();
     });

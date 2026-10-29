@@ -1,65 +1,77 @@
-/* ============================================================
-   NetWatcher — SSE live-traffic stream
-   ============================================================ */
+import { S, emit } from './state.js';
+import { formatBytes, sampleRate } from './util.js';
+import { pushThroughput, clearThroughput } from './panels.js';
 
-import { S } from './state.js';
-import { formatBytes } from './util.js';
-import { pushThroughput } from './panels.js';
+let stream = null;
+export function disconnectTrafficStream() {
+  stream?.close();
+  stream = null;
+  S.streamHealthy = false;
+  emit('stream:changed');
+}
 
 export function connectTrafficStream() {
+  if (stream || S.paused) return;
   let es;
   try { es = new EventSource('/api/traffic-stream'); }
-  catch (err) { console.warn('[traffic] EventSource unsupported', err); return; }
-
-  es.addEventListener('delta', (ev) => {
-    let arr;
-    try { arr = JSON.parse(ev.data); } catch { return; }
-    if (!Array.isArray(arr)) return;
-
-    S.streamHealthy = true;
-    S.lastDeltaAt = Date.now();
-
-    let rxBytesPerSec = 0, txBytesPerSec = 0;
-    for (const e of arr) {
-      if (!e || typeof e.key !== 'string') continue;
-      const bytesIn = Number(e.bytesIn) || 0;   // no `| 0` — that truncates to 32-bit signed (wraps past ~2.1 GB)
-      const bytesOut = Number(e.bytesOut) || 0;
-      const prevBytes = S.liveTraffic.get(e.key);
-      if (prevBytes) {
-        // A *decreasing* counter means nettop reset / the 5-tuple was reused:
-        // count the fresh absolute value rather than dropping the delta to 0.
-        const drx = bytesIn < prevBytes.bytesIn ? bytesIn : bytesIn - prevBytes.bytesIn;
-        const dtx = bytesOut < prevBytes.bytesOut ? bytesOut : bytesOut - prevBytes.bytesOut;
-        rxBytesPerSec += Math.max(0, drx);
-        txBytesPerSec += Math.max(0, dtx);
-      }
-      S.liveTraffic.set(e.key, { bytesIn, bytesOut });
-      // Patch the row in place if visible.
-      const sel = `.c[data-traffic-key="${CSS.escape(e.key)}"]`;
-      const row = document.querySelector(sel);
-      if (!row) continue;
-      const rxEl = row.querySelector('[data-role="rx"]');
-      const txEl = row.querySelector('[data-role="tx"]');
-      if (rxEl) rxEl.textContent = `↓${formatBytes(bytesIn)}`;
-      if (txEl) txEl.textContent = `↑${formatBytes(bytesOut)}`;
-    }
-    // Push the tick into throughput history. The stream delivers roughly 1/s.
-    pushThroughput(rxBytesPerSec, txBytesPerSec);
-  });
-
-  es.addEventListener('error', () => {
-    // EventSource auto-reconnects, but surface the degraded state meanwhile.
+  catch { S.streamHealthy = false; emit('stream:changed'); return; }
+  stream = es;
+  es.addEventListener('open', () => {
+    if (es !== stream) return;
     S.streamHealthy = false;
+    S.streamConnectedAt = Date.now();
+    S.lastDeltaAt = 0;
+    S.hasRateSample = false;
+    S.liveTraffic.clear(); // Never turn a reconnect gap into a traffic spike.
+    clearThroughput();
+    emit('stream:changed');
   });
-  es.addEventListener('open', () => { S.streamHealthy = true; });
-
-  // Decay the throughput readout to 0 when no deltas arrive (the server only
-  // emits a delta when traffic > 0). Paused while the tab is hidden.
-  setInterval(() => {
-    if (document.visibilityState !== 'visible') return;
-    if (S.lastDeltaAt && Date.now() - S.lastDeltaAt >= 1500) {
-      pushThroughput(0, 0);
-      S.lastDeltaAt = Date.now(); // keep ticking 0s while idle, but only once/window
+  es.addEventListener('delta', (ev) => {
+    if (es !== stream || S.paused) return;
+    let entries;
+    try { entries = JSON.parse(ev.data); } catch { return; }
+    if (!Array.isArray(entries)) return;
+    const now = Date.now();
+    const seconds = S.lastDeltaAt ? Math.max((now - S.lastDeltaAt) / 1000, 0.1) : 0;
+    let rx = 0, tx = 0;
+    for (const value of S.liveTraffic.values()) { value.rxBps = 0; value.txBps = 0; }
+    for (const entry of entries) {
+      if (!entry || typeof entry.key !== 'string') continue;
+      const bytesIn = Number(entry.bytesIn), bytesOut = Number(entry.bytesOut);
+      if (!Number.isFinite(bytesIn) || !Number.isFinite(bytesOut) || bytesIn < 0 || bytesOut < 0) continue;
+      const prev = S.liveTraffic.get(entry.key);
+      const rxBps = sampleRate(prev?.bytesIn, bytesIn, seconds);
+      const txBps = sampleRate(prev?.bytesOut, bytesOut, seconds);
+      rx += rxBps; tx += txBps;
+      S.liveTraffic.set(entry.key, { bytesIn, bytesOut, rxBps, txBps });
+      for (const row of document.querySelectorAll(`.c[data-traffic-key="${CSS.escape(entry.key)}"]`)) {
+        row.querySelector('[data-role="rx"]').textContent = `↓${formatBytes(bytesIn)}`;
+        row.querySelector('[data-role="tx"]').textContent = `↑${formatBytes(bytesOut)}`;
+      }
     }
-  }, 1000);
+    S.streamHealthy = true;
+    S.lastDeltaAt = now;
+    if (seconds) { S.hasRateSample = true; pushThroughput(rx, tx); }
+    emit('traffic:changed');
+    emit('stream:changed');
+  });
+  es.addEventListener('health', ev => {
+    if (es !== stream) return;
+    let health;
+    try { health = JSON.parse(ev.data); } catch { return; }
+    const healthy = health.healthy === true;
+    if (!healthy) {
+      S.lastDeltaAt = 0; S.hasRateSample = false;
+      S.liveTraffic.clear(); clearThroughput();
+    }
+    S.streamHealthy = healthy;
+    emit('stream:changed');
+  });
+  es.addEventListener('error', () => {
+    if (es !== stream) return;
+    S.streamHealthy = false;
+    clearThroughput();
+    emit('stream:changed');
+    emit('traffic:changed');
+  });
 }

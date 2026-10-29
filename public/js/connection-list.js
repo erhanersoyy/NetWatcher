@@ -2,12 +2,15 @@
    NetWatcher — Connection queue: render, filters, events
    ============================================================ */
 
-import { escapeHtml, isIPv6, isPrivateIP, isLocalhost, flag, formatBytes } from './util.js';
-import { el } from './dom.js';
-import { S, on } from './state.js';
+import { escapeHtml, isIPv6, isPrivateIP, isLocalhost, flag, formatBytes, describeBlock, summarizeProcesses, canonicalIP } from './util.js';
+import { el, preserveFocus } from './dom.js';
+import { S, on, emit } from './state.js';
 import { fetchConnections } from './api.js';
+import { showToast } from './modals.js';
 import { prefersReducedMotion, updateRadar } from './radar.js';
 import { killProcessAction, vtCheckAction, blockIPAction, unblockIPAction } from './actions.js';
+import { filterMapProcesses, processKey } from './radar-data.js';
+import { renderVerificationBadge, renderVerificationDetails } from './process-verification.js';
 
 // ---------- DOM aliases ----------
 const {
@@ -22,19 +25,53 @@ const liveTraffic  = S.liveTraffic;   // Map — mutated in place only
 const expandedPids = S.expandedPids;  // Set — mutated in place only
 const filter       = S.filter;        // object — mutated in place only
 
+function blockState(ip) {
+  return describeBlock(ip, S.pfIPs, S.blockedMeta, S.staleCount, S.historyFresh, S.firewallStatus);
+}
+function processRate(proc, direction) {
+  if (!S.streamHealthy || Date.now() - S.lastDeltaAt > 3000) return 0;
+  return proc.connections.reduce((sum, c) => sum + (liveTraffic.get(c.trafficKey)?.[direction + 'Bps'] || 0), 0);
+}
+function processRateLabel(proc) {
+  if (S.paused) return 'Paused';
+  if (!S.streamHealthy || !S.hasRateSample || !S.lastDeltaAt || Date.now() - S.lastDeltaAt > 3000) return 'Rate unavailable';
+  return `↓${formatBytes(processRate(proc, 'rx'))}/s ↑${formatBytes(processRate(proc, 'tx'))}/s`;
+}
+function updateTrafficSummaries() {
+  if (!S.lastData) return;
+  if (S.paused) {
+    updateRadar(applyFilters(S.lastData, false));
+    queueEl.querySelectorAll('[data-role="proc-rate"]').forEach(el => { el.textContent = 'Paused'; });
+    return;
+  }
+  const filtered = applyFilters(S.lastData);
+  const speedSort = ['rx', 'tx'].includes(sortSelect.value);
+  if (speedSort && !queueEl.contains(document.activeElement) && !document.querySelector('dialog[open]')) renderQueue(true);
+  for (const proc of filtered) {
+    const row = queueEl.querySelector(`.row[data-pid="${proc.pid}"]`);
+    const total = row?.querySelector('[data-role="proc-total"]');
+    const rate = row?.querySelector('[data-role="proc-rate"]');
+    if (total) total.textContent = `Total ↓↑ ${formatBytes(procSummary(proc).totalBytes)}`;
+    if (rate) rate.textContent = processRateLabel(proc);
+  }
+  renderTopTalkers(filtered);
+  updateRadar(applyFilters(S.lastData, false));
+}
+
 // ---------- Sort / filter ----------
 function sortProcesses(processes) {
   const mode = sortSelect.value;
   return [...processes].sort((a, b) => {
     if (mode === 'pid') return a.pid - b.pid;
     if (mode === 'name') return a.processName.localeCompare(b.processName);
+    if (mode === 'rx' || mode === 'tx') return processRate(b, mode) - processRate(a, mode) || a.pid - b.pid;
     return b.connections.length - a.connections.length;
   });
 }
 
-function applyFilters(processes) {
+function applyFilters(processes, withMap = true) {
   const search = filter.q.toLowerCase().trim();
-  return processes
+  const base = processes
     .filter(proc => !(filter.sys && proc.isSystemProcess))
     .map(proc => {
       const filtered = proc.connections.filter(conn => {
@@ -49,6 +86,7 @@ function applyFilters(processes) {
       return { ...proc, connections: filtered };
     })
     .filter(proc => proc.connections.length > 0);
+  return withMap ? filterMapProcesses(base, S.mapSelection) : base;
 }
 
 // ---------- Process aggregation (for the row meta line) ----------
@@ -74,16 +112,11 @@ function computeRenderSig() {
   if (!S.lastData) return '';
   const sort = sortSelect.value;
   const exp = [...expandedPids].sort((a, b) => a - b).join(',');
-  const filt = `${filter.sys ? 1 : 0}${filter.v6 ? 1 : 0}${filter.priv ? 1 : 0}|${filter.q}`;
-  const blocked = [...S.blockedIPs].sort().join(',');
-  const dataParts = [];
-  for (const p of S.lastData) {
-    dataParts.push(`${p.pid}:${p.connections.length}`);
-    for (const c of p.connections) {
-      dataParts.push(`${c.remoteAddress}:${c.remotePort}:${c.state}`);
-    }
-  }
-  return `${sort}|${exp}|${filt}|${blocked}|${dataParts.join(';')}`;
+  const filt = `${filter.sys ? 1 : 0}${filter.v6 ? 1 : 0}${filter.priv ? 1 : 0}|${filter.q}|${JSON.stringify(S.mapSelection)}`;
+  const blocks = [...S.blockedIPs].sort().map(ip => [ip, blockState(ip).label]);
+  return JSON.stringify([sort, exp, filt, blocks, S.connectionsError, S.lastData.map(p => ({
+    ...p, connections: p.connections.map(({ bytesIn, bytesOut, ...c }) => c),
+  }))]);
 }
 
 // ---------- Render ----------
@@ -96,10 +129,12 @@ function updateExpandToggle(visible) {
   const lbl = btn.querySelector('.lbl');
   if (lbl) lbl.textContent = allOpen ? 'collapse all' : 'expand all';
   btn.title = allOpen ? 'Collapse all' : 'Expand all';
+  btn.setAttribute('aria-label', btn.title);
+  btn.setAttribute('aria-expanded', String(allOpen));
 }
 
 function renderQueueEmpty() {
-  const anyFilterOn = filter.sys || filter.v6 || filter.priv || filter.q;
+  const anyFilterOn = filter.sys || filter.v6 || filter.priv || filter.q || S.mapSelection;
   const clearBtn = anyFilterOn
     ? '<div><button class="queue-clear-filters" data-action="clear-filters">Clear filters</button></div>'
     : '';
@@ -159,73 +194,83 @@ function renderProcRow(proc, i) {
   const f = summary.primaryCC ? flag(summary.primaryCC) : '';
   const countryLabel = summary.primaryCC
     ? `${f} ${summary.primaryCC}${summary.countryCount > 1 ? ` +${summary.countryCount - 1}` : ''}`
-    : '· local';
-  const traffic = summary.totalBytes > 0 ? `↓↑ ${formatBytes(summary.totalBytes)}` : '';
-  const killBtn = `<button class="kill ${proc.isSystemProcess ? 'danger' : ''}" data-action="kill" data-pid="${proc.pid}" data-name="${escapeHtml(proc.processName)}" data-system="${proc.isSystemProcess ? '1' : '0'}" title="Kill PID ${proc.pid}">kill</button>`;
+    : proc.connections.every(c => isPrivateIP(c.remoteAddress)) ? 'Local network' : 'Location unknown';
+  const traffic = `Total ↓↑ ${formatBytes(summary.totalBytes)}`;
+  const killBtn = `<button ${!proc.identity?.token ? 'disabled' : ''} class="kill ${proc.isSystemProcess ? 'danger' : ''}" data-action="kill" data-pid="${proc.pid}" data-name="${escapeHtml(proc.processName)}" data-system="${proc.isSystemProcess ? '1' : '0'}" data-focus-key="kill-${proc.pid}" aria-label="End ${escapeHtml(proc.processName)} (PID ${proc.pid})" title="End PID ${proc.pid}">End process</button>`;
 
   const rowHtml = `
-    <div class="row ${proc.isSystemProcess ? 'sys' : ''} ${expanded ? 'active' : ''}" data-action="toggle" data-pid="${proc.pid}" tabindex="0" role="button" aria-expanded="${expanded}">
+    <div class="row ${proc.isSystemProcess ? 'sys' : ''} ${expanded ? 'active' : ''}" data-pid="${proc.pid}">
       <div class="idx">${idx}</div>
-      <div class="name"><span class="pname" title="${escapeHtml(proc.description || proc.processName)}">${escapeHtml(proc.processName)}</span>${killBtn}</div>
+      <div class="name"><button class="process-toggle" data-action="toggle" data-pid="${proc.pid}" data-focus-key="toggle-${proc.pid}" aria-expanded="${expanded}" aria-controls="connections-${proc.pid}"><span aria-hidden="true">${expanded ? "▾" : "▸"}</span><span class="pname" title="${escapeHtml(proc.description || proc.processName)}">${escapeHtml(proc.processName)}</span></button>${killBtn}</div>
       <div class="n">
         <span>${proc.connections.length}</span>
         <span class="bar"><span style="transform:scaleX(${w})"></span></span>
       </div>
       <div class="meta">
-        <span>pid ${proc.pid}</span>
+        <span>pid ${proc.pid}</span>${proc.isSystemProcess ? '<span title="Classification based on the process name">System label</span>' : ''}
+        ${renderVerificationBadge(proc.verification)}
         <span class="sep">·</span>
         <span>${countryLabel}</span>
-        ${traffic ? `<span class="sep">·</span><span>${traffic}</span>` : ''}
+        <span class="sep">·</span><span data-role="proc-total">${traffic}</span><span data-role="proc-rate">${processRateLabel(proc)}</span>
       </div>
     </div>
   `;
 
   if (!expanded) return rowHtml;
-  return rowHtml + renderConnBlock(proc);
+  const identity = proc.identity;
+  const details = identity
+    ? `<div class="identity-note">OS-reported path: <code>${escapeHtml(identity.executable)}</code><br>UID ${identity.uid} · Parent PID ${identity.parentPid} · Started ${escapeHtml(identity.startedAt)}${renderVerificationDetails(proc.verification)}</div>`
+    : '<div class="identity-note">Process identity unavailable. Ending this process is disabled until identity can be read.</div>';
+  return rowHtml + details + renderConnBlock(proc);
 }
 
 function renderConnBlock(proc) {
-  const rows = proc.connections.map(conn => {
+  const rows = proc.connections.map((conn, index) => {
     const geo = conn.geo;
     const f = flag(geo?.countryCode);
     const countryLabel = geo
       ? `${f}${geo.city ? ' ' + escapeHtml(geo.city) + ', ' : ' '}${escapeHtml(geo.country || '')}`
-      : 'resolving…';
+      : isPrivateIP(conn.remoteAddress) ? 'Local network'
+      : conn.enrichment?.geo === 'pending' ? 'Looking up location…'
+      : conn.enrichment?.geo === 'rate-limited' ? 'Location service rate limited' : 'Location unavailable';
     const ispLabel = geo?.isp ? `<span class="isp" title="${escapeHtml(geo.isp)}">${escapeHtml(geo.isp)}</span>` : '';
     const dom = conn.domain && conn.domain !== '-'
-      ? `<span class="dom">${escapeHtml(conn.domain)}</span>`
-      : '';
+      ? `<span class="dom" title="Reverse DNS name; not a verified application destination">PTR: ${escapeHtml(conn.domain)}</span>`
+      : conn.enrichment?.dns === 'pending' ? '<span class="dom">Looking up PTR…</span>' : '';
     const tKey = conn.trafficKey;
     const live = liveTraffic.get(tKey);
     const rx = live ? live.bytesIn : conn.bytesIn;
     const tx = live ? live.bytesOut : conn.bytesOut;
     const canFirewall = !isPrivateIP(conn.remoteAddress) && !isLocalhost(conn.remoteAddress);
-    const blocked = S.blockedIPs.has(conn.remoteAddress);
-    const acts = [];
+    const blocked = S.blockedIPs.has(canonicalIP(conn.remoteAddress));
+    const focusKey = `${proc.pid}-${conn.trafficKey}-${index}`;
+    const acts = [`<button data-action="copy" data-copy="${escapeHtml(conn.remoteAddress)}" data-focus-key="copy-${escapeHtml(focusKey)}">Copy IP</button>`];
+    if (conn.domain && conn.domain !== '-') acts.push(`<button data-action="copy" data-copy="${escapeHtml(conn.domain)}" data-focus-key="domain-${escapeHtml(focusKey)}">Copy domain</button>`);
     if (canFirewall) {
-      acts.push(`<button class="vt" data-action="vt" data-ip="${escapeHtml(conn.remoteAddress)}" title="VirusTotal lookup">VT</button>`);
+      acts.push(`<button class="vt" data-focus-key="vt-${escapeHtml(focusKey)}" data-action="vt" data-ip="${escapeHtml(conn.remoteAddress)}" title="VirusTotal lookup">VirusTotal</button>`);
       if (blocked) {
-        acts.push(`<button class="unblock" data-action="unblock" data-ip="${escapeHtml(conn.remoteAddress)}" title="Remove from pf block table">Unblock</button>`);
+        acts.push(`<button class="unblock" data-focus-key="unblock-${escapeHtml(focusKey)}" data-action="unblock" data-ip="${escapeHtml(conn.remoteAddress)}" title="Remove from pf block table">Unblock</button>`);
       } else {
-        acts.push(`<button class="block" data-action="block" data-ip="${escapeHtml(conn.remoteAddress)}" title="Add to pf block table">Block</button>`);
+        acts.push(`<button class="block" data-focus-key="block-${escapeHtml(focusKey)}" data-action="block" data-ip="${escapeHtml(conn.remoteAddress)}" title="Add to pf block table">Block</button>`);
       }
     }
-    const blockedTag = blocked ? '<span class="blocked-tag">BLOCKED</span>' : '';
+    const state = blockState(conn.remoteAddress);
+    const blockedTag = blocked ? `<span class="blocked-tag ${state.kind}">${state.label}</span>` : '';
     return `
       <div class="c" data-ip="${escapeHtml(conn.remoteAddress)}" data-traffic-key="${escapeHtml(tKey)}">
         <span class="ip"><span class="proto">${escapeHtml(conn.protocol || '')}</span><b>${escapeHtml(conn.remoteAddress)}</b><span class="port">:${conn.remotePort}</span>${dom}</span>
         <span class="meta">
           <span>${countryLabel}</span>
           ${ispLabel}
-          <span class="rx" data-role="rx">↓${formatBytes(rx)}</span>
-          <span class="tx" data-role="tx">↑${formatBytes(tx)}</span>
+          <span class="rx" data-role="rx" title="Cumulative received bytes">↓${formatBytes(rx)}</span>
+          <span class="tx" data-role="tx" title="Cumulative sent bytes">↑${formatBytes(tx)}</span>
           ${blockedTag}
         </span>
         <span class="acts">${acts.join('')}</span>
       </div>
     `;
   }).join('');
-  return `<div class="conn">${rows}</div>`;
+  return `<div class="conn" id="connections-${proc.pid}">${rows}</div>`;
 }
 
 function renderTopTalkers(sorted) {
@@ -241,18 +286,24 @@ function renderTopTalkers(sorted) {
   }
   const entries = [...byCountry.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6);
   if (entries.length === 0) {
-    talkersListEl.innerHTML = '<div class="line"><span class="k">— no traffic —</span><span class="v"></span></div>';
+    talkersListEl.innerHTML = `<div class="line"><span class="k">${sorted.some(p => p.connections.length) ? 'Geolocation unavailable for these connections' : 'No connections in current view'}</span></div>`;
     return;
   }
   talkersListEl.innerHTML = entries.map(([country, bytes]) =>
-    `<div class="line"><span class="k">${escapeHtml(country)}</span><span class="v hot">${escapeHtml(formatBytes(bytes))}</span></div>`,
+    `<div class="line"><span class="k">${escapeHtml(country)}</span><span class="v">${escapeHtml(formatBytes(bytes))}</span></div>`,
   ).join('');
 }
 
 function renderQueue(force = false) {
+  if (document.querySelector('dialog[open]')) return;
   if (!S.lastData) {
-    queueEl.innerHTML = '<div class="queue-empty">Loading connections…</div>';
+    queueEl.innerHTML = `<div class="queue-empty">${S.connectionsError ? 'Connections unavailable. Use Retry above.' : 'Loading connections…'}</div>`;
+    dProc.textContent = dProcSys.textContent = dProcUsr.textContent = dConn.textContent = dCtry.textContent = '—';
+    dConnSub.textContent = dCtrySub.textContent = 'No connection snapshot';
+    el.queueSummary.textContent = S.connectionsError ? 'Connection snapshot unavailable' : 'Loading connection snapshot…';
+    talkersListEl.textContent = 'No connection snapshot';
     S.lastRenderSig = '';
+    updateRadar([]);
     return;
   }
   if (!force) {
@@ -266,6 +317,7 @@ function renderQueue(force = false) {
   const sorted = sortProcesses(filtered);
 
   updateExpandToggle(sorted);
+  const restoreFocus = preserveFocus(queueEl);
 
   if (sorted.length === 0) {
     queueEl.innerHTML = renderQueueEmpty();
@@ -273,35 +325,23 @@ function renderQueue(force = false) {
     queueEl.innerHTML = sorted.map((p, i) => renderProcRow(p, i)).join('');
     flashNewRows(sorted);
   }
+  restoreFocus();
   S.prevPids = new Set((S.lastData || []).map((p) => p.pid));
   S.prevConnKeys = new Set((S.lastData || []).flatMap((p) => p.connections.map((c) => `${p.pid}|${c.remoteAddress}`)));
 
-  const totalConns = sorted.reduce((s, p) => s + p.connections.length, 0);
-  const countries = new Set();
-  const asns = new Set();
-  let established = 0, timewait = 0, other = 0;
-  for (const p of sorted) {
-    for (const c of p.connections) {
-      if (c.geo?.countryCode) countries.add(c.geo.countryCode);
-      if (c.geo?.isp) asns.add(c.geo.isp);
-      const st = (c.state || '').toUpperCase();
-      if (st.startsWith('EST')) established++;
-      else if (st.includes('TIME')) timewait++;
-      else other++;
-    }
-  }
-  dProc.textContent = sorted.length;
-  const sysCount = (S.lastData || []).filter(p => p.isSystemProcess).length;
-  dProcSys.textContent = sysCount;
-  dProcUsr.textContent = (S.lastData || []).length - sysCount;
-  dConn.textContent = totalConns;
-  dConnSub.textContent = `${established} EST · ${timewait} TIME_WAIT · ${other} other`;
-  dCtry.textContent = countries.size;
-  dCtrySub.textContent = `across ${asns.size} ASN range${asns.size === 1 ? '' : 's'}`;
+  const totals = summarizeProcesses(sorted);
+  dProc.textContent = totals.processes;
+  dProcSys.textContent = totals.system;
+  dProcUsr.textContent = totals.user;
+  dConn.textContent = totals.connections;
+  dConnSub.textContent = `${totals.established} EST · ${totals.timewait} TIME_WAIT · ${totals.other} other`;
+  dCtry.textContent = totals.countries;
+  dCtrySub.textContent = `${totals.providers} service provider${totals.providers === 1 ? '' : 's'}`;
+  el.queueSummary.textContent = `Showing ${sorted.length} of ${S.lastData.length} processes · your user’s connections`;
 
   updateChipCounts(filtered.length);
   renderTopTalkers(sorted);
-  updateRadar(sorted);
+  updateRadar(applyFilters(S.lastData, false));
 }
 
 function clearFilters() {
@@ -309,8 +349,12 @@ function clearFilters() {
   filter.v6 = false;
   filter.priv = false;
   filter.q = '';
+  S.mapSelection = null;
+  S.mapProcess = null;
   for (const key of ['sys', 'v6', 'priv']) {
-    chipsEl.querySelector(`.chip[data-f="${key}"]`)?.classList.remove('on');
+    const chip = chipsEl.querySelector(`.chip[data-f="${key}"]`);
+    chip?.classList.remove('on');
+    chip?.setAttribute('aria-pressed', 'false');
   }
   qEl.value = '';
   renderQueue();
@@ -320,6 +364,24 @@ function clearFilters() {
 export function initConnectionList() {
   // Bus: drive renderQueue from data:changed (replaces shim in main.js)
   on('data:changed', () => renderQueue());
+  on('map:selection', () => renderQueue(true));
+  on('map:inspect', () => {
+    const visible = applyFilters(S.lastData || []);
+    for (const proc of visible) expandedPids.add(proc.pid);
+    document.body.classList.remove('queue-collapsed');
+    qToggleBtn.setAttribute('aria-expanded', 'true');
+    qToggleBtn.title = 'Collapse process list';
+    qToggleBtn.setAttribute('aria-label', qToggleBtn.title);
+    qToggleIcon.setAttribute('d', 'M10 4 L5 8 L10 12');
+    renderQueue(true);
+    const first = queueEl.querySelector('.process-toggle');
+    first?.focus({ preventScroll: true });
+    first?.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+  });
+  on('dialog:closed', () => renderQueue());
+  on('traffic:changed', updateTrafficSummaries);
+  on('stream:changed', () => { if (S.paused || !S.streamHealthy) updateTrafficSummaries(); });
+  setInterval(() => { if (!document.hidden) updateTrafficSummaries(); }, 2000);
 
   // Queue click delegation: toggle, clear-filters, retry, kill, vt, block, unblock
   queueEl.addEventListener('click', (e) => {
@@ -331,11 +393,18 @@ export function initConnectionList() {
       const pid = Number(target.dataset.pid);
       if (expandedPids.has(pid)) expandedPids.delete(pid);
       else expandedPids.add(pid);
+      const proc = S.lastData?.find(p => p.pid === pid);
+      S.mapProcess = proc && expandedPids.has(pid) ? processKey(proc) : null;
+      emit('map:process');
       renderQueue();
       return;
     }
     if (action === 'clear-filters') { clearFilters(); return; }
-    if (action === 'retry-connections') { fetchConnections(); return; }
+    if (action === 'retry-connections') { fetchConnections({ force: true }); return; }
+    if (action === 'copy') {
+      Promise.resolve().then(() => navigator.clipboard.writeText(target.dataset.copy)).then(() => showToast('Copied to clipboard', 'success'), () => showToast('Could not copy. Select the address and copy it manually.', 'error'));
+      return;
+    }
     e.stopPropagation();
     if (action === 'kill') {
       killProcessAction(Number(target.dataset.pid), target.dataset.name, target.dataset.system === '1', target);
@@ -346,17 +415,6 @@ export function initConnectionList() {
     } else if (action === 'unblock') {
       unblockIPAction(target.dataset.ip, target);
     }
-  });
-
-  // Keyboard: Enter/Space toggle + focus restore
-  queueEl.addEventListener('keydown', (e) => {
-    if (e.key !== 'Enter' && e.key !== ' ') return;
-    const row = e.target.closest?.('.row[data-action="toggle"]');
-    if (!row) return;
-    e.preventDefault();
-    const pid = row.dataset.pid;
-    row.click();
-    queueEl.querySelector(`.row[data-pid="${CSS.escape(pid)}"]`)?.focus();
   });
 
   // Search (debounced)
@@ -394,6 +452,7 @@ export function initConnectionList() {
       return;
     }
     b.classList.toggle('on');
+    b.setAttribute('aria-pressed', String(b.classList.contains('on')));
     if (f in filter) filter[f] = b.classList.contains('on');
     renderQueue();
   });
@@ -403,6 +462,8 @@ export function initConnectionList() {
     document.body.classList.toggle('queue-collapsed');
     const collapsed = document.body.classList.contains('queue-collapsed');
     qToggleBtn.title = collapsed ? 'Expand process list' : 'Collapse process list';
+    qToggleBtn.setAttribute('aria-label', qToggleBtn.title);
+    qToggleBtn.setAttribute('aria-expanded', String(!collapsed));
     qToggleIcon.setAttribute('d', collapsed ? 'M6 4 L11 8 L6 12' : 'M10 4 L5 8 L10 12');
     window.dispatchEvent(new Event('resize'));
   });
