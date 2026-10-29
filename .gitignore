@@ -29,3 +29,7 @@ data/
 # Claude Code — entire config directory is per-user, not for sharing
 .claude/
 CLAUDE.local.md
+
+# Local project instructions and working documents
+/CLAUDE.md
+/docs/
